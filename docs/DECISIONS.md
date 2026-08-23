@@ -16,6 +16,40 @@ Entry format:
 
 ---
 
+### D011 — 2026-08-23 — Firewall, not buyer, calls Settlement — [human + Claude Fable 5]
+- **Decision:** `settlement_request` is sent firewall → settlement and
+  carries both the buyer-signed cart mandate and the firewall-signed
+  verdict. Settlement accepts requests only from the configured firewall key
+  and still re-verifies the verdict and mandate signatures itself. Buyer and
+  seller agents have no route to settlement (PROTOCOL.md §7, §7.10).
+- **Because:** A single trusted caller makes "no LLM output can trigger
+  settlement" (CONSTRAINTS #6) a property provable by code search, not by
+  argument; ARCHITECTURE.md and FLOW.md already assumed this shape and the
+  draft spec contradicted them.
+- **Instead of:** Buyer → settlement with a verdict reference (draft §7.10),
+  which leaves a buyer-reachable settlement endpoint to defend.
+- **Tradeoff accepted:** The firewall becomes a relay; if it is down,
+  settlement cannot be reached — acceptable, it is the point of a firewall.
+- **Revisit if:** multi-firewall or third-party-firewall topologies appear
+  (out of scope for v0.1).
+
+### D010 — 2026-08-23 — Principal-signed Intent Mandate registered with the firewall up front — [human + Claude Fable 5]
+- **Decision:** The Intent Mandate is signed by a long-lived principal key
+  (distinct from any agent session key) and deposited with the firewall via
+  a new `mandate_register` message before `session_init`. The firewall audits
+  carts only against its stored copy (PROTOCOL.md §5, §7.0, §8).
+- **Because:** The draft had the buyer agent both sign the mandate and hand
+  it to the firewall at settlement time — a corrupted buyer agent could
+  re-author its own authorization, which silently defeats the flagship
+  intent-drift demo (THREAT_MODEL T5). Registration up front gives the
+  firewall a reference that cannot move after negotiation starts, which is
+  the AP2 principle the protocol claims to follow (D003).
+- **Instead of:** Mandate carried in `settlement_request` (draft FLOW F1 step
+  7), or signed by the buyer agent's session key.
+- **Tradeoff accepted:** One extra message type and a demo-seeded principal
+  keypair; the firewall now holds per-session state before a session exists.
+- **Revisit if:** never — it is the trust root of the whole firewall story.
+
 ### D009 — 2026-08-23 — Docs bundle flattened to repo root — [human + Claude Fable 5]
 - **Decision:** `negotiator-docs/` packaging folder removed; `docs/` lives at
   the repo root, `CLAUDE.md` and `PROTOCOL.md` at the root, `README-DOCS.md`

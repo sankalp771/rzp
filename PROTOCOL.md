@@ -24,7 +24,7 @@ Out of scope for v0.1: multi-merchant discovery, auctions/broadcast negotiation,
 | Term | Meaning |
 |---|---|
 | Session | One negotiation lifecycle, identified by `session_id`, between one buyer and one seller |
-| Principal | The human (or org) on whose behalf an agent acts |
+| Principal | The human (or org) on whose behalf an agent acts. Holds its own long-lived keypair, distinct from any agent's session key |
 | Intent Mandate | Signed object stating what the buyer's principal authorized the buyer agent to achieve, and its limits |
 | Cart Mandate | Signed object binding the final agreed deal to an exact catalog snapshot and price |
 | Round | One offer/counter exchange pair within the negotiation phase |
@@ -37,6 +37,7 @@ Out of scope for v0.1: multi-merchant discovery, auctions/broadcast negotiation,
 - Character encoding is UTF-8. Monetary amounts are integers in **minor units** (paise) with an ISO 4217 `currency` field (v0.1 fixes this to INR). Floating-point money is prohibited everywhere, including internally.
 - Timestamps are RFC 3339 UTC with millisecond precision.
 - For signing and hashing, the message MUST be serialized with **JSON Canonicalization Scheme (JCS, RFC 8785)**. Implementations MUST NOT sign pretty-printed or key-order-dependent serializations.
+- **Hash and encoding conventions (apply everywhere in this spec):** every hash (`key_id`, `catalog_hash`, `mandate_hash`, `intent_mandate_ref`, ledger entry hashes) is SHA-256 over the JCS serialization of the object in question, encoded as **lowercase hex** (64 chars). Public keys are raw 32-byte Ed25519 keys and signatures raw 64-byte values, both encoded as **standard base64 with padding**. Identifiers (`message_id`, `session_id`, `agent_id`) are opaque strings; where a UUID is required it is lowercase UUIDv4.
 - A receiver MUST validate an incoming message against the JSON Schema for its `type` before any other processing. Schema-invalid messages are rejected with error `SCHEMA_INVALID` and ledger-logged; they MUST NOT advance session state.
 
 ## 4. Message envelope
@@ -51,7 +52,7 @@ Every ACNP message consists of an **envelope** and a type-specific **body**. Env
 | `message_id` | string (UUIDv4) | MUST | Globally unique per message |
 | `session_id` | string (UUIDv4) | MUST | Constant for the whole session; minted by the buyer in `session_init` |
 | `seq` | integer | MUST | Per-sender, per-session, starts at 1, increments by exactly 1 per message sent |
-| `in_reply_to` | string | SHOULD | `message_id` of the message being answered; absent only on `session_init` |
+| `in_reply_to` | string | SHOULD | `message_id` of the message being answered; absent only on `mandate_register` and `session_init` |
 | `sender` | object | MUST | `{ agent_id, role }` where role ∈ `buyer` \| `seller` \| `firewall` \| `settlement` |
 | `timestamp` | string | MUST | RFC 3339 UTC; receiver rejects if outside ±120 s of local clock (`CLOCK_SKEW`) |
 | `body` | object | MUST | Type-specific payload (§7) |
@@ -59,10 +60,12 @@ Every ACNP message consists of an **envelope** and a type-specific **body**. Env
 
 ## 5. Identity and signatures
 
-- Each agent holds an Ed25519 keypair generated **per session** (limits blast radius of key compromise; see THREAT_MODEL T9). `key_id` is the SHA-256 fingerprint of the public key.
+- Each agent holds an Ed25519 keypair generated **per session** (limits blast radius of key compromise; see THREAT_MODEL T9). `key_id` is the SHA-256 hash of the raw public key bytes, lowercase hex.
 - Public keys are exchanged in `session_init` / `session_ack` and pinned for the session. Any later message signed by a different key is rejected with `SIG_INVALID`.
-- The signature is computed over the JCS serialization of the envelope with the `signature` field removed. Receivers MUST verify: (a) the signature, (b) that `key_id` matches the pinned key for `sender.agent_id`, before any body processing.
+- **Bootstrap (trust-on-first-use within a session):** `session_init` and `session_ack` are signed with the key they carry. The receiver verifies the signature against the *embedded* key, then pins that key to `sender.agent_id` for the rest of the session. The firewall's and settlement's public keys are **not** session-scoped: they are long-lived and distributed to agents by configuration (`FIREWALL_PUBLIC_KEY`, `SETTLEMENT_PUBLIC_KEY` environment variables); messages from those roles are verified against the configured keys.
+- The signature is computed over the JCS serialization of the envelope with the `signature` field removed. Receivers MUST verify: (a) the signature, (b) that `key_id` matches the pinned (or configured) key for `sender.agent_id` / `sender.role`, before any body processing.
 - The firewall and settlement services each hold their own keypair; verdicts and receipts are signed artifacts like any other message.
+- The **principal** holds a long-lived keypair that signs the Intent Mandate (§8) and nothing else. An agent's session key MUST NOT be accepted as a mandate signature — otherwise a compromised buyer agent could simply re-author its own authorization (THREAT_MODEL T5). The firewall is configured with the set of acceptable principal public keys.
 
 ## 6. Ordering, replay, and idempotency
 
@@ -72,7 +75,19 @@ Every ACNP message consists of an **envelope** and a type-specific **body**. Env
 
 ## 7. Message types
 
-Lifecycle order: `session_init → session_ack → catalog_request → catalog_offer → offer → counter_offer ×N → [bundle_proposal] → accept | reject | walk_away → cart_mandate → firewall_verdict → settlement_request → settlement_receipt`. `error` may occur at any point.
+Lifecycle order: `mandate_register → session_init → session_ack → catalog_request → catalog_offer → offer → counter_offer ×N → [bundle_proposal] → accept | reject | walk_away → cart_mandate → firewall_verdict → settlement_request → settlement_receipt`. `error` may occur at any point.
+
+Who talks to whom (normative): buyer ↔ seller for everything from `session_init` through `accept`/`reject`/`walk_away`; buyer → firewall for `mandate_register` and `cart_mandate`; **firewall → settlement** for `settlement_request`. The buyer and seller agents have no endpoint on, and no route to, the settlement service. Settlement accepts `settlement_request` only from the firewall's configured key.
+
+### 7.0 `mandate_register` (buyer → firewall)
+Sent once, before `session_init`, to deposit the principal-signed Intent Mandate with the firewall. Body:
+
+| Field | Req | Rules |
+|---|---|---|
+| `intent_mandate` | MUST | The full Intent Mandate object (§8) including its principal signature |
+| `buyer_public_key` | MUST | The session key the buyer will use in `session_init`, base64 — lets the firewall pin the buyer for this session |
+
+Firewall rules: verify the principal signature against a configured principal key (`MANDATE_SIG_INVALID` otherwise); reject if `valid_until` has passed (`MANDATE_EXPIRED`); compute `intent_mandate_ref` = hash of the mandate (§3) and store the mandate by that ref. A second registration with the same ref is idempotent; a registration whose body differs but whose `session_id` is already bound is rejected (`MANDATE_CONFLICT`). The firewall replies with `mandate_ack` (body: `intent_mandate_ref`). **The stored copy is the only mandate the firewall will ever audit against** — nothing the buyer sends later can replace it.
 
 ### 7.1 `session_init` (buyer → seller)
 Opens a session. Body:
@@ -121,7 +136,7 @@ A structured multi-item offer: `bundles[]`, each with `line_items[]`, `bundle_pr
 - `walk_away` body: `reason_code` ∈ `budget_exhausted` | `rounds_exhausted` | `no_acceptable_terms` | `deadline` | `policy`. Terminates the session; no further non-error messages are valid.
 
 ### 7.8 `cart_mandate` (buyer → firewall, copied to seller)
-The bridge from negotiation to money. Body:
+The bridge from negotiation to money. The firewall MUST reject a `cart_mandate` whose `intent_mandate_ref` was not previously deposited via `mandate_register` (`MANDATE_UNKNOWN`), or whose sender key is not the one pinned at registration (`SIG_INVALID`). Body:
 
 | Field | Rules |
 |---|---|
@@ -134,14 +149,14 @@ The bridge from negotiation to money. Body:
 
 Signed by the buyer agent. This is the artifact the firewall audits.
 
-### 7.9 `firewall_verdict` (firewall → settlement, ledger, dashboard)
-Body: `cart_mandate_hash`, `verdict` ∈ `allow` | `block` | `escalate`, `layer` ∈ `policy` | `intent_verifier` | `human`, `reasons[]` (machine-readable codes: e.g. `AMOUNT_CAP_EXCEEDED`, `VELOCITY_LIMIT`, `MERCHANT_NOT_ALLOWLISTED`, `CATEGORY_BLOCKED`, `INTENT_DRIFT_QUANTITY`, `INTENT_DRIFT_CATEGORY`, `INTENT_DRIFT_BUDGET`), optional `verifier_summary` (LLM prose, informational). Rules:
+### 7.9 `firewall_verdict` (firewall → buyer, seller, ledger, dashboard; attached to `settlement_request`)
+Every verdict is delivered to both agents so each can advance its own state machine (§9); `allow` verdicts are additionally carried inside the `settlement_request` the firewall sends to settlement. Body: `cart_mandate_hash`, `verdict` ∈ `allow` | `block` | `escalate`, `layer` ∈ `policy` | `intent_verifier` | `human`, `reasons[]` (machine-readable codes: e.g. `AMOUNT_CAP_EXCEEDED`, `VELOCITY_LIMIT`, `MERCHANT_NOT_ALLOWLISTED`, `CATEGORY_BLOCKED`, `INTENT_DRIFT_QUANTITY`, `INTENT_DRIFT_CATEGORY`, `INTENT_DRIFT_BUDGET`), optional `verifier_summary` (LLM prose, informational). Rules:
 - Layer 1 (deterministic policy) runs first and can block alone.
 - Layer 2 (LLM intent-verifier) runs only if layer 1 allows, and can only *recommend*; a deterministic component applies the final verdict.
 - `escalate` parks the settlement in the human approval queue; a queue timeout auto-resolves to `block` (THREAT_MODEL T10) and is itself a ledger event.
 
-### 7.10 `settlement_request` (buyer → settlement, only with an `allow` verdict)
-Body: `cart_mandate` (full), `firewall_verdict_ref`. Settlement MUST independently re-verify the verdict signature and that verdict ⟶ this exact `mandate_hash`. Settlement then creates a Razorpay test-mode order with the mandate hash as idempotency key, bounded retry with exponential backoff, and awaits webhook confirmation (webhook signature verified; THREAT_MODEL T8).
+### 7.10 `settlement_request` (firewall → settlement, only with an `allow` verdict)
+Body: `cart_mandate` (full, still carrying the buyer's signature), `firewall_verdict` (full, carrying the firewall's signature). Settlement MUST, independently of the transport-level envelope check: (a) verify the envelope is signed by the configured firewall key; (b) verify the embedded verdict's own signature; (c) verify `verdict == "allow"` and `verdict.cart_mandate_hash == cart_mandate.mandate_hash` after recomputing that hash itself (`VERDICT_MISMATCH` otherwise); (d) verify the cart mandate's buyer signature. Defense in depth: even a compromised firewall host cannot make settlement accept a mandate the buyer never signed. Settlement then creates a Razorpay test-mode order with the mandate hash as idempotency key, bounded retry with exponential backoff, and awaits webhook confirmation (webhook signature verified; THREAT_MODEL T8).
 
 ### 7.11 `settlement_receipt` (settlement → buyer, seller, ledger)
 Body: `mandate_hash`, `razorpay_order_id`, `status` ∈ `paid` | `failed` | `refunded`, `amount`, `timestamp_paid`, `ledger_entry_hash`. The receipt embeds the cart mandate hash, closing the accountability chain: intent → cart → verdict → receipt, every link signed.
@@ -151,7 +166,7 @@ Body: `code` (from §10), `detail` (string, no secrets), `offending_message_id` 
 
 ## 8. Mandates (the authorization chain)
 
-**Intent Mandate** — created and signed at buyer instantiation, stored buyer-side and at the firewall, never revealed to the seller:
+**Intent Mandate** — authored and signed by the **principal** (not the buyer agent) before the buyer agent is instantiated; deposited with the firewall via `mandate_register` (§7.0); held buyer-side as read-only input to strategy; never revealed to the seller:
 
 | Field | Rules |
 |---|---|
@@ -160,7 +175,7 @@ Body: `code` (from §10), `detail` (string, no secrets), `offending_message_id` 
 | `constraints` | Structured: `max_quantity`, `categories_allowed[]`, `deadline`, `delivery_max_days` |
 | `preferences` | Soft, for LLM reasoning only |
 | `max_rounds`, `valid_until` | Session limits |
-| `principal_id`, `issued_at`, signature | Provenance |
+| `principal_id`, `principal_public_key`, `issued_at`, `signature` | Provenance. `signature` is Ed25519 by the principal key over the JCS form of the mandate with `signature` removed (same scheme as §5) |
 
 The firewall's layer 2 question is exactly: *does this cart mandate semantically satisfy this intent mandate?* Drift examples it must catch: quantity drift (intent implies 1, cart has 3), category drift (goal "gift", cart "server RAM"), budget drift (cart within cap but wildly inconsistent with goal).
 
@@ -172,24 +187,33 @@ States: `INIT → NEGOTIATING → AGREED → COMPLIANCE_REVIEW → SETTLING → 
 
 | From | Event | To |
 |---|---|---|
-| INIT | `session_ack` received | NEGOTIATING |
-| NEGOTIATING | `accept` (verified) | AGREED |
-| NEGOTIATING | `walk_away` / rounds exhausted / `valid_until` passed | WALKED_AWAY / EXPIRED |
+| — | `mandate_ack` received (buyer) / `session_init` sent or received | INIT |
+| INIT | `session_ack` received / sent | NEGOTIATING |
+| NEGOTIATING | `catalog_request`, `catalog_offer`, `offer`, `counter_offer`, `bundle_proposal`, `reject` | NEGOTIATING |
+| NEGOTIATING | `accept` (echo verified) | AGREED |
+| NEGOTIATING | `walk_away` / rounds exhausted | WALKED_AWAY |
+| NEGOTIATING, AGREED | `valid_until` passed | EXPIRED |
 | AGREED | `cart_mandate` submitted | COMPLIANCE_REVIEW |
 | COMPLIANCE_REVIEW | verdict `allow` | SETTLING |
 | COMPLIANCE_REVIEW | verdict `block` or escalation timeout | BLOCKED |
 | COMPLIANCE_REVIEW | verdict `escalate` | COMPLIANCE_REVIEW (held; human decision → SETTLING or BLOCKED) |
 | SETTLING | receipt `paid` | SETTLED |
 | SETTLING | retries exhausted / receipt `failed` | FAILED (refund path if partially captured) |
+| any non-terminal | fatal `error` (§10) | FAILED |
 
-Any message arriving in a state where it is not listed as a valid event is rejected with `STATE_INVALID`. Both agents, the firewall, and settlement each maintain the state machine independently; divergence is detectable from the ledger.
+Terminal states: `SETTLED`, `WALKED_AWAY`, `BLOCKED`, `FAILED`, `EXPIRED`. Any message arriving in a state where it is not listed as a valid event is rejected with `STATE_INVALID`. Both agents, the firewall, and settlement each maintain the state machine independently; divergence is detectable from the ledger.
 
 ## 10. Error codes
 
-Fatal (terminate session): `VERSION_UNSUPPORTED`, `SIG_INVALID`, `REPLAY_DETECTED`, `SEQUENCE_GAP`, `ACCEPT_MISMATCH`, `STATE_INVALID`, `MANDATE_EXPIRED`.
-Recoverable (reject message, session continues): `SCHEMA_INVALID`, `TOTAL_MISMATCH`, `CLOCK_SKEW`, `RATE_LIMITED`, `ITEM_UNAVAILABLE`.
-Settlement domain: `VERDICT_MISSING`, `VERDICT_MISMATCH`, `SETTLEMENT_RETRY_EXHAUSTED`, `WEBHOOK_SIG_INVALID`.
-Every emitted error is a ledger entry.
+| Class | Codes |
+|---|---|
+| Fatal (terminate session) | `VERSION_UNSUPPORTED`, `SIG_INVALID`, `REPLAY_DETECTED`, `SEQUENCE_GAP`, `ACCEPT_MISMATCH`, `STATE_INVALID`, `ROUNDS_EXCEEDED`, `MANDATE_EXPIRED`, `MANDATE_UNKNOWN`, `MANDATE_SIG_INVALID`, `MANDATE_CONFLICT` |
+| Recoverable (reject message, session continues) | `SCHEMA_INVALID`, `TOTAL_MISMATCH`, `CLOCK_SKEW`, `RATE_LIMITED`, `ITEM_UNAVAILABLE`, `SESSION_UNKNOWN`, `CAPABILITY_UNSUPPORTED` |
+| Settlement domain | `VERDICT_MISSING`, `VERDICT_MISMATCH`, `SETTLEMENT_RETRY_EXHAUSTED`, `WEBHOOK_SIG_INVALID` |
+
+`CAPABILITY_UNSUPPORTED` is returned when a message relies on a capability the `session_ack` manifest did not advertise (e.g. a `bundle_proposal` after `bundling: false`). `SESSION_UNKNOWN` is returned for any `session_id` the receiver has no state for (other than `session_init`). Every emitted error is a ledger entry.
+
+Ledger-only event types (not errors, never sent on the wire): `BOUNDS_CLAMPED` (seller policy engine altered an LLM proposal, §7.5), `ESCALATION_TIMEOUT` (§7.9), `SETTLEMENT_ATTEMPT` (each Razorpay call, §7.10).
 
 ## 11. Ledger requirements
 
@@ -201,7 +225,7 @@ Every protocol message, firewall verdict, settlement event, clamp event (§7.5),
 
 ## 13. Conformance checklist (used by integration tests)
 
-An implementation conforms if it: validates schema before processing; verifies every signature against the pinned session key; enforces seq monotonicity and rejects replays; recomputes all totals; enforces `max_rounds`; verifies `accept` echoes; never settles without an `allow` verdict bound to the exact mandate hash; treats all free-text fields as untrusted LLM input; and ledger-logs every message and rejection. Each clause maps to at least one test in `docs/TEST_CHECKLIST.md` Gate 5.
+An implementation conforms if it: validates schema before processing; verifies every signature against the pinned session key (or configured key for firewall/settlement/principal roles); enforces seq monotonicity and rejects replays; recomputes all totals and hashes it is asked to trust; enforces `max_rounds`; verifies `accept` echoes; audits carts only against a mandate deposited via `mandate_register`; never settles without an `allow` verdict bound to the exact mandate hash; exposes no buyer- or seller-reachable route to settlement; treats all free-text fields as untrusted LLM input; and ledger-logs every message and rejection. Each clause maps to at least one test in `docs/TEST_CHECKLIST.md` Gates 1 (protocol), 3 (firewall), 4 (settlement) and 6 (integration).
 
 ---
 
