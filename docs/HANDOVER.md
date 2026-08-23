@@ -13,8 +13,7 @@ handoff entries scroll down.
 monorepo, 4 fastify service stubs with `/health`, Compose all-healthy, CI
 workflow, `.env.example`, LICENSE, README skeleton (FEATURE-001).
 **In progress:** —
-**Broken / unverified:** GitHub Actions CI has not executed yet (no remote
-pushed). PROTOCOL.md draft exists but has not been reviewed against
+**Broken / unverified:** PROTOCOL.md draft exists but has not been reviewed against
 ARCHITECTURE.md / CONSTRAINTS.md.
 **Do not touch / avoid:** `.env` holds real free-tier keys (gitignored) — the
 keys were pasted in chat and should be rotated before submission.
@@ -61,6 +60,6 @@ Format — exactly five lines plus header:
 - Watch out: Docker context must exclude `*.tsbuildinfo` or images ship
   without `dist/`; Compose healthchecks must use `CMD-SHELL` for `$PORT`.
 - Tests: Gate 0 lint/typecheck/test pass (8/8 ×3); Gate 6 compose-healthy
-  pass; CI workflow unverified.
+  pass; CI run 32627953190 green (test + compose).
 - Decisions: D006 (TS monorepo), D007 (SQLite), D008 (Gemini/Groq/Mistral),
   D009 (docs layout).

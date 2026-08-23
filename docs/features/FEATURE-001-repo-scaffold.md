@@ -78,10 +78,10 @@ settlement   Up 28 seconds (healthy)
 $ curl localhost:4001/health
 {"status":"ok","service":"merchant","protocol":"acnp/0.1"}
 ```
-Not verified: the GitHub Actions workflow has not run yet (no remote pushed).
+CI — first push, run 32627953190: jobs `test: success`, `compose: success`.
 
 ## Outcome
-- **Status:** done (CI workflow unverified until first push)
+- **Status:** done
 - **Decisions generated:** D006, D007, D008, D009
 - **Follow-ups spawned:** BUG-001 (fixed in same commit)
 - **Plain-language explanation (for the pitch):** The repo is a single
