@@ -1,0 +1,49 @@
+# One-command spinup of The Negotiator. `docker compose up --build`.
+# Ports: merchant 4001, buyer 4002, firewall 4003, settlement 4004.
+# Secrets come from .env (copy .env.example); nothing is baked into images.
+
+x-service: &service
+  env_file: .env
+  restart: unless-stopped
+
+services:
+  merchant:
+    <<: *service
+    build: { context: ., args: { SERVICE: merchant } }
+    ports: ['4001:4001']
+    environment: { PORT: 4001 }
+    healthcheck: &healthcheck
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:$${PORT}/health || exit 1']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  buyer:
+    <<: *service
+    build: { context: ., args: { SERVICE: buyer } }
+    ports: ['4002:4002']
+    environment: { PORT: 4002 }
+    healthcheck: *healthcheck
+    depends_on:
+      merchant: { condition: service_healthy }
+      firewall: { condition: service_healthy }
+
+  firewall:
+    <<: *service
+    build: { context: ., args: { SERVICE: firewall } }
+    ports: ['4003:4003']
+    environment: { PORT: 4003 }
+    healthcheck: *healthcheck
+    depends_on:
+      settlement: { condition: service_healthy }
+
+  settlement:
+    <<: *service
+    build: { context: ., args: { SERVICE: settlement } }
+    ports: ['4004:4004']
+    environment: { PORT: 4004 }
+    healthcheck: *healthcheck
+    volumes:
+      # SQLite ledger persists across restarts; gitignored on the host.
+      - ./data/settlement:/app/data

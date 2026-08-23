@@ -1,0 +1,13 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/protocol" },
+    { "path": "packages/llm" },
+    { "path": "services/merchant" },
+    { "path": "services/buyer" },
+    { "path": "services/firewall" },
+    { "path": "services/settlement" },
+    { "path": "dashboard" },
+    { "path": "evals" }
+  ]
+}

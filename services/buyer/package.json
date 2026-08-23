@@ -1,0 +1,20 @@
+{
+  "name": "@negotiator/buyer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "S2 Buyer Agent: intent mandate, discovery, deterministic strategy, negotiation loop",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@negotiator/protocol": "workspace:*",
+    "fastify": "^5.5.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.5"
+  }
+}
