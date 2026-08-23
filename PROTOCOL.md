@@ -111,6 +111,7 @@ Body: `items[]`, each:
 |---|---|
 | `item_id` | Stable identifier |
 | `title`, `description` | Free text. Buyer implementations MUST treat these as untrusted content w.r.t. their LLM (prompt-injection surface; THREAT_MODEL T4) |
+| `category` | Seller-declared category string; matched against the Intent Mandate's `categories_allowed` by the firewall (§7.9 `CATEGORY_BLOCKED`) |
 | `variants[]` | Each with `variant_id`, attributes, `list_price`, `stock` |
 | `catalog_hash` | Seller-computed hash of this exact item snapshot; later bound into the cart mandate (THREAT_MODEL T1) |
 
@@ -128,7 +129,7 @@ The negotiation workhorses. Body:
 Seller-side rule (normative for this implementation): every outbound `counter_offer` passes a deterministic bounds check against merchant policy (floor price, max discount, margin) *after* LLM generation. Out-of-bounds proposals are clamped or regenerated and the event ledger-logged. The prompt is not the enforcement mechanism.
 
 ### 7.6 `bundle_proposal` (seller → buyer)
-A structured multi-item offer: `bundles[]`, each with `line_items[]`, `bundle_price`, `expires_at`. Semantics: accepting a bundle means accepting exactly its line items at exactly its price. May be cut under schedule pressure (BUILD_PLAN cut order #4).
+A structured multi-item offer: `bundles[]`, each with `bundle_id`, `line_items[]`, `bundle_price`, `expires_at`. Semantics: accepting a bundle means accepting exactly its line items at exactly its price. May be cut under schedule pressure (BUILD_PLAN cut order #4).
 
 ### 7.7 `accept` / `reject` / `walk_away`
 - `accept` body: `accepted_message_id` (the exact offer/counter/bundle accepted) plus a full echo of its `line_items` and `total`. Receiver MUST verify the echo matches the referenced message byte-for-byte after canonicalization (`ACCEPT_MISMATCH` otherwise). This prevents "accept" from quietly accepting different terms.
@@ -159,7 +160,7 @@ Every verdict is delivered to both agents so each can advance its own state mach
 Body: `cart_mandate` (full, still carrying the buyer's signature), `firewall_verdict` (full, carrying the firewall's signature). Settlement MUST, independently of the transport-level envelope check: (a) verify the envelope is signed by the configured firewall key; (b) verify the embedded verdict's own signature; (c) verify `verdict == "allow"` and `verdict.cart_mandate_hash == cart_mandate.mandate_hash` after recomputing that hash itself (`VERDICT_MISMATCH` otherwise); (d) verify the cart mandate's buyer signature. Defense in depth: even a compromised firewall host cannot make settlement accept a mandate the buyer never signed. Settlement then creates a Razorpay test-mode order with the mandate hash as idempotency key, bounded retry with exponential backoff, and awaits webhook confirmation (webhook signature verified; THREAT_MODEL T8).
 
 ### 7.11 `settlement_receipt` (settlement → buyer, seller, ledger)
-Body: `mandate_hash`, `razorpay_order_id`, `status` ∈ `paid` | `failed` | `refunded`, `amount`, `timestamp_paid`, `ledger_entry_hash`. The receipt embeds the cart mandate hash, closing the accountability chain: intent → cart → verdict → receipt, every link signed.
+Body: `mandate_hash`, `razorpay_order_id`, `status` ∈ `paid` | `failed` | `refunded`, `amount`, `currency`, `timestamp_paid` (absent unless `paid`), `ledger_entry_hash`. The receipt embeds the cart mandate hash, closing the accountability chain: intent → cart → verdict → receipt, every link signed.
 
 ### 7.12 `error`
 Body: `code` (from §10), `detail` (string, no secrets), `offending_message_id` if applicable. Errors never advance state; fatal errors (§10) terminate the session.
