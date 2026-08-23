@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import { PROTOCOL_VERSION } from '@negotiator/protocol';
+import { PROTOCOL_NAME, PROTOCOL_VERSION } from '@negotiator/protocol';
 
 export const SERVICE_NAME = 'firewall';
 
@@ -13,7 +13,8 @@ export function buildApp() {
   app.get('/health', async () => ({
     status: 'ok',
     service: SERVICE_NAME,
-    protocol: PROTOCOL_VERSION,
+    protocol: PROTOCOL_NAME,
+    version: PROTOCOL_VERSION,
   }));
   return app;
 }
