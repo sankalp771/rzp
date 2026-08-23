@@ -8,19 +8,20 @@ handoff entries scroll down.
 
 ## Current state (edit in place)
 
-**Phase:** Week 1, Day 1 done (a day early).
+**Phase:** Week 1, Day 2 done (a day early).
 **Done:** Docs system; stack decided (D006–D009); repo scaffold — pnpm/TS
 monorepo, 4 fastify service stubs with `/health`, Compose all-healthy, CI
 workflow, `.env.example`, LICENSE, README skeleton (FEATURE-001).
 **In progress:** —
-**Broken / unverified:** PROTOCOL.md draft exists but has not been reviewed against
-ARCHITECTURE.md / CONSTRAINTS.md.
+**Broken / unverified:** `packages/protocol` still pins `'acnp/0.1'`; spec
+envelope is `protocol: "ACNP"`, `version: "0.1"` — fix in FEATURE-003.
 **Do not touch / avoid:** `.env` holds real free-tier keys (gitignored) — the
 keys were pasted in chat and should be rotated before submission.
 `tsconfig.tsbuildinfo` must stay out of the Docker context (see FEATURE-001).
 **Next up (ordered):**
 1. ~~Repo scaffold + Docker Compose skeleton + CI pipeline~~ ✅ FEATURE-001
-2. PROTOCOL.md v0.1 review pass — message types, field tables, state machine
+2. ~~PROTOCOL.md v0.1 review pass~~ ✅ FEATURE-002 (D010 mandate
+   registration, D011 firewall-owned settlement path)
 3. Message signing + schema validation library (shared)
 4. Merchant Commerce Server: catalog + capabilities manifest + policy config
 5. Buyer Agent: intent mandate + discovery + strategy engine (no LLM yet)
@@ -51,6 +52,18 @@ Format — exactly five lines plus header:
 - Decisions: <"none" or pointer to DECISIONS.md entries added>
 
 <!-- entries begin below -->
+
+### 2026-08-23 14:30 — [Claude Fable 5 (claude-fable-5)]
+- Did: FEATURE-002 PROTOCOL.md review — added `mandate_register`/`mandate_ack`,
+  principal-signed mandate, firewall→settlement path, TOFU bootstrap rule,
+  hash/encoding conventions, full state table, error catalogue; aligned
+  FLOW/ARCHITECTURE/THREAT_MODEL to spec names.
+- Left: nothing on FEATURE-002.
+- Watch out: the firewall now holds per-session state BEFORE `session_init`
+  (keyed by `intent_mandate_ref`); settlement must reject any caller but the
+  firewall key — both are Day 3/8 implementation obligations.
+- Tests: Gate 0 lint pass; docs cross-check table in FEATURE-002.
+- Decisions: D010, D011.
 
 ### 2026-08-23 13:45 — [Claude Fable 5 (claude-fable-5)]
 - Did: Flattened docs bundle to root; recorded D006–D009; built FEATURE-001

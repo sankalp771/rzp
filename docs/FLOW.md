@@ -8,72 +8,86 @@ mark the section you are currently modifying with `⚠ UNDER CHANGE — <task>`.
 
 ## F1 — Happy path: intent to receipt
 
-1. Operator (or demo seed) creates an **Intent Mandate** → Buyer Agent signs
-   it and stores it; ledger entry written.
-2. Buyer Agent → Merchant Server: fetch capabilities manifest → verify
-   protocol version compatibility → fetch catalog.
+1. Operator (or demo seed) — the **principal** — authors and signs an
+   **Intent Mandate** with the principal key (PROTOCOL §8). Buyer Agent is
+   instantiated with it read-only, generates a session keypair, and sends
+   `mandate_register` → **Firewall**: principal signature verified → mandate
+   stored by `intent_mandate_ref` → buyer key pinned → `mandate_ack`;
+   ledger entries on both sides.
+2. Buyer Agent → Merchant Server: `session_init` (self-signed, carries key +
+   `intent_mandate_ref` hash only) → seller pins key, replies `session_ack`
+   with capabilities manifest + chosen version → Buyer verifies compatibility
+   → `catalog_request` → `catalog_offer` (with per-item `catalog_hash`).
 3. Buyer Agent internal: shortlist against mandate preferences → strategy
    engine computes reservation price + opening offer → LLM adapter drafts the
-   offer text → protocol layer wraps, sequences, signs → send `intent` +
-   first `counter`.
+   rationale text → protocol layer wraps, sequences, signs → send `offer`.
 4. Merchant Server: boundary checks (signature, schema, session/sequence
    replay check) → seller policy engine computes allowable response envelope
    (floor, max discount) → LLM adapter drafts counteroffer WITHIN envelope →
    deterministic bounds check on the drafted number (clamp/regenerate if
-   breached) → sign → respond `counter` (or `bundle_proposal`).
+   breached; `BOUNDS_CLAMPED` ledger event) → sign → respond `counter_offer`
+   (or `bundle_proposal` if advertised).
 5. Rounds repeat (each message: boundary checks → ledger entry) until Buyer
    strategy decides accept or walk-away.
-6. On accept: Buyer builds **Cart Mandate** referencing the Intent Mandate id
-   and final terms → signs → sends `accept` + `cart_mandate`.
-7. Buyer Agent → **Firewall**: `settlement_request` (cart mandate + original
-   intent mandate).
+6. On accept: Buyer sends `accept` (echoing the accepted line items; seller
+   verifies the echo) → builds **Cart Mandate** binding `intent_mandate_ref`,
+   the accepted message id, per-item `catalog_hash`es and final total → signs
+   → sends `cart_mandate` to the **Firewall**, copy to the seller.
+7. **Firewall** audits the cart against the mandate it stored in step 1 —
+   never against anything the buyer sends now.
    - Layer 1 deterministic checks → hard block possible (→ F3).
    - Layer 2 LLM intent-verifier → recommends allow / block / escalate →
      deterministic applier enforces verdict; ledger entry with reasoning
-     summary.
-8. On allow: Firewall → Settlement service: create Razorpay order (test mode,
-   idempotency key) → payment simulated/authorized in test mode → Razorpay
-   webhook → webhook signature verified → settlement confirmed → `receipt`
-   message signed and sent to both agents → final ledger entries → session
-   closed.
+     summary → signed `firewall_verdict` sent to buyer and seller.
+8. On allow: **Firewall → Settlement**: `settlement_request` (cart mandate +
+   verdict, both signed). Settlement re-verifies firewall envelope, verdict
+   signature, mandate hash, buyer signature → creates Razorpay order (test
+   mode, `mandate_hash` as idempotency key) → payment simulated/authorized in
+   test mode → Razorpay webhook → webhook signature verified → settlement
+   confirmed → `settlement_receipt` signed and sent to both agents → final
+   ledger entries → session `SETTLED`.
+
+The buyer and seller never call Settlement; it accepts requests only from the
+firewall's configured key (D011).
 
 ## F2 — Negotiation walk-away
 
 Same as F1 through step 5; Buyer strategy hits walk-away condition (offer
-above reservation price at final round / deadline reached) → sends a terminal
-decline message → both sides write closing ledger entries → session closed
-with outcome `no_deal`. Evals count this path — it is a success of strategy,
+above reservation price at final round / deadline reached) → sends
+`walk_away` with a `reason_code` → both sides write closing ledger entries →
+session `WALKED_AWAY`. Evals count this path — it is a success of strategy,
 not a failure of the system.
 
 ## F3 — Firewall block & escalate
 
 - **Block (layer 1):** deterministic rule fails (amount cap, velocity,
   allowlist, category, time window) → settlement refused with machine-readable
-  reason code → ledger entry → buyer notified via terminal `settlement_denied`
-  message → session closed `blocked`.
+  reason code → ledger entry → signed `firewall_verdict` (`block`) sent to
+  buyer and seller → session `BLOCKED`.
 - **Block (layer 2 applied):** intent-verifier finds semantic mismatch with
   the Intent Mandate → same closure path, reason includes verifier summary.
-- **Escalate:** verdict `escalate` → settlement held in `pending_approval` →
-  appears in dashboard approval queue → human approves (resume F1 step 8) or
-  rejects (block closure path). Timeout on the queue → auto-block after a
-  configured window.
+- **Escalate:** verdict `escalate` → session held in `COMPLIANCE_REVIEW` →
+  appears in dashboard approval queue → human approves (verdict re-issued
+  with `layer: human`, resume F1 step 8) or rejects (block closure path).
+  Timeout on the queue → `ESCALATION_TIMEOUT` ledger event → auto-block.
 - **Flagship demo:** buyer seeded with corrupted goal walks this path and is
   caught between step 7 and 8.
 
 ## F4 — Settlement failure & retry
 
 Order creation or payment fails → retry with exponential backoff up to a
-ceiling (same idempotency key — no duplicate orders) → on exhaustion, session
-enters `settlement_failed`, ledger records each attempt → refund path invoked
-if any partial capture exists → both agents receive terminal failure message.
+ceiling (same idempotency key — no duplicate orders; each try is a
+`SETTLEMENT_ATTEMPT` ledger event) → on exhaustion, session enters `FAILED`
+→ refund path invoked if any partial capture exists → both agents receive a
+`settlement_receipt` with `status: failed`.
 
 ## F5 — Boundary rejection (any step)
 
 Any received message that fails signature, schema, version, or replay checks:
 rejected at the boundary → never reaches agent logic → rejection ledger entry
-with reason → sender receives a protocol error message with an error code from
-PROTOCOL.md. Repeated rejections from a peer trip a per-session circuit
-breaker.
+with reason → sender receives an `error` message with a code from PROTOCOL.md
+§10 (fatal codes terminate the session → `FAILED`). Repeated rejections from
+a peer trip a per-session circuit breaker.
 
 ## F6 — Ledger write path (cross-cutting)
 

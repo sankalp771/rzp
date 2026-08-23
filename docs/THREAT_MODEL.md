@@ -50,8 +50,11 @@
 
 ### T5 — Intent drift / corrupted buyer goal (flagship scenario)
 - Attack: buyer agent state corrupted; cart no longer matches the mandate.
-- Mitigation: firewall layer 2 semantic verification against the ORIGINAL
-  signed mandate; escalate path with human queue.
+- Mitigation: the Intent Mandate is signed by the principal's key (not the
+  agent's) and deposited with the firewall BEFORE the session opens
+  (`mandate_register`, D010); layer 2 semantic verification runs only
+  against that stored copy, so a corrupted agent cannot re-author its own
+  authorization; escalate path with human queue.
 - Test:
 
 ### T6 — Audit ledger tampering

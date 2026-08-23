@@ -29,8 +29,9 @@ making the whole negotiation cryptographically replayable.
   clamped or regenerated, never sent.
 
 ### S2 — Buyer Agent
-- Instantiated with an Intent Mandate: goal, budget ceiling, preferences
-  (hard vs soft), deadline, max rounds.
+- Instantiated with a principal-signed Intent Mandate (read-only): goal,
+  budget ceiling, preferences (hard vs soft), deadline, max rounds. Registers
+  it with the firewall before opening a session (D010).
 - Pipeline per session: discover catalog → shortlist → plan strategy →
   negotiate rounds → decide (accept / counter / walk away) → request
   settlement.
@@ -41,8 +42,9 @@ making the whole negotiation cryptographically replayable.
 
 ### S3 — Protocol Layer (shared library, not a runtime service)
 - Versioned JSON messages over HTTP. Canonical flow:
-  `intent → catalog_offer → counter (×N) → [bundle_proposal] → accept →
-  cart_mandate → settlement_request → receipt`.
+  `mandate_register → session_init → session_ack → catalog_request →
+  catalog_offer → offer → counter_offer (×N) → [bundle_proposal] → accept →
+  cart_mandate → firewall_verdict → settlement_request → settlement_receipt`.
 - Every message: schema-validated, carries protocol version, session id,
   monotonically increasing sequence number, timestamp, and an Ed25519
   signature over the canonical serialization. Per-agent keypairs.
@@ -55,7 +57,10 @@ making the whole negotiation cryptographically replayable.
   machine, error codes, and versioning rules.
 
 ### S4 — Compliance Firewall
-Sits between the Buyer Agent and Settlement. Two layers, strict order:
+Sits between the Buyer Agent and Settlement — it is the ONLY caller
+Settlement accepts (D011). Holds the principal-signed Intent Mandate from
+`mandate_register` and audits carts only against that stored copy. Two
+layers, strict order:
 1. **Deterministic policy engine** (runs first, can hard-block alone):
    amount cap, velocity limit (transactions per time window), merchant
    allowlist, category rules, time-window rules. Pure code; no LLM involved.
@@ -113,7 +118,10 @@ Sits between the Buyer Agent and Settlement. Two layers, strict order:
 - Buyer ↔ Merchant: mutually untrusted. Signatures + schema validation +
   replay protection at both edges.
 - Agents ↔ Firewall: agents are untrusted by the firewall by design; the
-  firewall trusts only the signed original Intent Mandate.
+  firewall trusts only the principal-signed Intent Mandate it stored before
+  the session began.
+- Firewall ↔ Settlement: settlement trusts the firewall's configured key as
+  the sole caller, but still re-verifies every embedded signature.
 - System ↔ Razorpay: only S5 talks to Razorpay; test keys only; webhook
   signatures verified.
 - Documented attack cases with mitigations: seller lies about stock; buyer
