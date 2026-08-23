@@ -8,13 +8,14 @@ handoff entries scroll down.
 
 ## Current state (edit in place)
 
-**Phase:** Week 1, Day 2 done (a day early).
+**Phase:** Week 1, Day 3 done (a day early).
 **Done:** Docs system; stack decided (D006–D009); repo scaffold — pnpm/TS
 monorepo, 4 fastify service stubs with `/health`, Compose all-healthy, CI
 workflow, `.env.example`, LICENSE, README skeleton (FEATURE-001).
 **In progress:** —
-**Broken / unverified:** `packages/protocol` still pins `'acnp/0.1'`; spec
-envelope is `protocol: "ACNP"`, `version: "0.1"` — fix in FEATURE-003.
+**Broken / unverified:** Replay rejections are not ledger-logged yet (no
+ledger until Day 10). `ReplayGuard` is in-memory only until services back
+it with SQLite.
 **Do not touch / avoid:** `.env` holds real free-tier keys (gitignored) — the
 keys were pasted in chat and should be rotated before submission.
 `tsconfig.tsbuildinfo` must stay out of the Docker context (see FEATURE-001).
@@ -22,7 +23,7 @@ keys were pasted in chat and should be rotated before submission.
 1. ~~Repo scaffold + Docker Compose skeleton + CI pipeline~~ ✅ FEATURE-001
 2. ~~PROTOCOL.md v0.1 review pass~~ ✅ FEATURE-002 (D010 mandate
    registration, D011 firewall-owned settlement path)
-3. Message signing + schema validation library (shared)
+3. ~~Message signing + schema validation library (shared)~~ ✅ FEATURE-003
 4. Merchant Commerce Server: catalog + capabilities manifest + policy config
 5. Buyer Agent: intent mandate + discovery + strategy engine (no LLM yet)
 6. LLM adapter layer + wire LLMs into both agents
@@ -52,6 +53,19 @@ Format — exactly five lines plus header:
 - Decisions: <"none" or pointer to DECISIONS.md entries added>
 
 <!-- entries begin below -->
+
+### 2026-08-23 16:00 — [Claude Fable 5 (claude-fable-5)]
+- Did: FEATURE-003 `packages/protocol` — JCS canonicalizer, SHA-256, Ed25519
+  via node:crypto (D012), zod schemas for all 17 types + Intent Mandate,
+  parseMessage with §10 codes, ReplayGuard, 19 committed JSON Schemas,
+  shared fixtures export. Fixed BUG-002. Spec tables aligned (526fe18).
+- Left: nothing on FEATURE-003.
+- Watch out: `canonicalize` must stay a hand-written emitter — do not
+  "simplify" back to sort+JSON.stringify (BUG-002). Run `pnpm --filter
+  @negotiator/protocol schemas` after any zod change or the drift test fails.
+- Tests: Gate 0 green; Gate 1 items 1, 2, 4 pass; item 3 pass except
+  ledger-logging (no ledger yet). 84/84 tests.
+- Decisions: D012.
 
 ### 2026-08-23 14:30 — [Claude Fable 5 (claude-fable-5)]
 - Did: FEATURE-002 PROTOCOL.md review — added `mandate_register`/`mandate_ack`,
