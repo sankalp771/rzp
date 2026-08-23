@@ -38,7 +38,7 @@ Out of scope for v0.1: multi-merchant discovery, auctions/broadcast negotiation,
 - Timestamps are RFC 3339 UTC with millisecond precision.
 - For signing and hashing, the message MUST be serialized with **JSON Canonicalization Scheme (JCS, RFC 8785)**. Implementations MUST NOT sign pretty-printed or key-order-dependent serializations.
 - **Hash and encoding conventions (apply everywhere in this spec):** every hash (`key_id`, `catalog_hash`, `mandate_hash`, `intent_mandate_ref`, ledger entry hashes) is SHA-256 over the JCS serialization of the object in question, encoded as **lowercase hex** (64 chars). Public keys are raw 32-byte Ed25519 keys and signatures raw 64-byte values, both encoded as **standard base64 with padding**. Identifiers (`message_id`, `session_id`, `agent_id`) are opaque strings; where a UUID is required it is lowercase UUIDv4.
-- A receiver MUST validate an incoming message against the JSON Schema for its `type` before any other processing. Schema-invalid messages are rejected with error `SCHEMA_INVALID` and ledger-logged; they MUST NOT advance session state.
+- A receiver MUST validate an incoming message against the JSON Schema for its `type` before any other processing. (Non-normative: the reference implementation's schemas are generated from `packages/protocol/src/schemas/` and committed under `packages/protocol/schemas/json/`.) Schema-invalid messages are rejected with error `SCHEMA_INVALID` and ledger-logged; they MUST NOT advance session state.
 
 ## 4. Message envelope
 

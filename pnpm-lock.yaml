@@ -41,6 +41,10 @@ importers:
       zod:
         specifier: ^4.4.3
         version: 4.4.3
+    devDependencies:
+      tsx:
+        specifier: ^4.20.5
+        version: 4.23.12
 
   services/buyer:
     dependencies:

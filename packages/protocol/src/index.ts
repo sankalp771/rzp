@@ -39,3 +39,6 @@ export { EnvelopeSchema, messageSchema } from './schemas/envelope.js';
 export type { Envelope, Message } from './schemas/envelope.js';
 export { isMessageType, parseMessage } from './validate.js';
 export type { ParseResult } from './validate.js';
+export { MemoryReplayStore, ReplayGuard } from './replay.js';
+export type { ReplayCheckInput, ReplayStore, ReplayVerdict } from './replay.js';
+export { exportJsonSchemas } from './jsonschema.js';
