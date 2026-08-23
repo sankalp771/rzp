@@ -16,6 +16,24 @@ Entry format:
 
 ---
 
+### D012 — 2026-08-23 — Ed25519 and SHA-256 via `node:crypto`; JCS hand-rolled — [human + Claude Fable 5]
+- **Decision:** Signatures and hashes use Node 22's built-in `node:crypto`
+  (Ed25519 is native since Node 12). RFC 8785 canonicalization is ~30 lines
+  of our own code, pinned by the RFC's test vector. Supersedes the
+  `@noble/ed25519` line of D006.
+- **Because:** Zero crypto dependencies means one less supply-chain link to
+  defend in front of a payments panel, and the runtime's crypto is already
+  audited. Our JSON subset (strings, integers, booleans, null, arrays,
+  objects — floats are banned by PROTOCOL.md §3) makes JCS equal to
+  `JSON.stringify` with recursively sorted keys, so a library adds risk
+  surface without adding correctness.
+- **Instead of:** `@noble/ed25519` (fine library, but redundant on Node 22)
+  and the `canonicalize` npm package (correct, but opaque on a slide).
+- **Tradeoff accepted:** Not portable to browsers without a shim — the
+  dashboard verifies via the services, never client-side.
+- **Revisit if:** a float or non-BMP string edge case ever reaches the
+  canonicalizer — then adopt `canonicalize` and keep our tests.
+
 ### D011 — 2026-08-23 — Firewall, not buyer, calls Settlement — [human + Claude Fable 5]
 - **Decision:** `settlement_request` is sent firewall → settlement and
   carries both the buyer-signed cart mandate and the firewall-signed
