@@ -46,7 +46,7 @@ export function verifyIntentMandate(
  * signing at boot with PRINCIPAL_PRIVATE_KEY from env.
  */
 export function seedDemoMandate(
-  principal: KeyPair,
+  principal: Pick<KeyPair, 'publicKey' | 'privateKey'>,
   now: () => Date = () => new Date(),
   overrides: Partial<Omit<IntentMandate, 'signature'>> = {},
 ): IntentMandate {

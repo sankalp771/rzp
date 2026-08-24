@@ -8,6 +8,12 @@ mark the section you are currently modifying with `⚠ UNDER CHANGE — <task>`.
 
 ## F1 — Happy path: intent to receipt
 
+Trigger: a run starts via the buyer's token-gated control plane —
+`POST /control/run` with the `x-control-token` shared secret (D014). The
+demo, the operator, and the evals harness (F7) all enter here; the endpoint
+returns the full signed transcript when the session reaches a terminal
+state.
+
 1. Operator (or demo seed) — the **principal** — authors and signs an
    **Intent Mandate** with the principal key (PROTOCOL §8). Buyer Agent is
    instantiated with it read-only, generates a session keypair, and sends

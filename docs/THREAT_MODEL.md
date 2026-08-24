@@ -93,3 +93,13 @@
 - Multi-merchant discovery/marketplace routing.
 - Full PKI with revocation.
 - Defense against a compromised host running both agents.
+- Production control-plane auth: the buyer's `POST /control/run` (which
+  triggers a spending workflow) is gated by a shared-secret header
+  (`CONTROL_TOKEN`, D014) and refuses to serve without it — demo-grade by
+  design; production would sit behind real operator authentication.
+- Principal key isolation: in the demo, `PRINCIPAL_PRIVATE_KEY` lives in the
+  same env as the agents so one-command spinup can seed a signed Intent
+  Mandate. In the real design the principal signs elsewhere and agents
+  receive only the signed artifact — an agent must never be able to read
+  the key that signs its own authorization (D010). `INTENT_MANDATE_JSON`
+  exists as the real-design-shaped alternative input.

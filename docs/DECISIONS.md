@@ -16,6 +16,23 @@ Entry format:
 
 ---
 
+### D014 — 2026-08-25 — Buyer runs are triggered by a token-gated control endpoint — [human + Claude Fable 5]
+- **Decision:** The buyer exposes `POST /control/run` (shared-secret header
+  `x-control-token` = `CONTROL_TOKEN`; refuses to serve when unset), which
+  executes one negotiation and returns the full transcript. The demo, the
+  operator, and the Day 11 evals harness all use this one seam.
+- **Because:** An unauthenticated endpoint that triggers a spending workflow
+  is a question the panel will ask; a shared secret is one env var and a few
+  lines, and a single run-trigger seam means the evals harness needs no new
+  surface later.
+- **Instead of:** (a) an unauthenticated endpoint documented as a non-goal —
+  answerable but weaker for the same effort; (b) a one-shot CLI script —
+  no seam for evals, and no way to trigger runs inside Compose networking.
+- **Tradeoff accepted:** Shared-secret auth is demo-grade (no rotation, no
+  per-caller identity) — recorded in THREAT_MODEL.md non-goals.
+- **Revisit if:** the dashboard (Day 10) grows real operator auth to sit in
+  front of it.
+
 ### D013 — 2026-08-24 — Synchronous transport binding for ACNP v0.1 — [human + Claude Fable 5]
 - **Decision:** v0.1 binds ACNP to synchronous HTTP request/response: the
   reply message rides in the 200 response body; inherently-async outcomes

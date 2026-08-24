@@ -29,6 +29,9 @@ services:
     build: { context: ., args: { SERVICE: buyer } }
     ports: ['4002:4002']
     environment: { PORT: 4002 }
+    volumes:
+      # Buyer sessions + replay guard memory (named volume, see merchant).
+      - buyer-data:/app/data
     healthcheck: *healthcheck
     depends_on:
       merchant: { condition: service_healthy }
@@ -55,4 +58,5 @@ services:
 
 volumes:
   merchant-data:
+  buyer-data:
   settlement-data:
