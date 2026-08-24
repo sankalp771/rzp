@@ -8,16 +8,24 @@ handoff entries scroll down.
 
 ## Current state (edit in place)
 
-**Phase:** Week 1, Day 4 done (a day early).
-**Done:** Docs system; stack decided (D006–D009); repo scaffold — pnpm/TS
-monorepo, 4 fastify service stubs with `/health`, Compose all-healthy, CI
-workflow, `.env.example`, LICENSE, README skeleton (FEATURE-001).
+**Phase:** Week 1, Day 5 done (a day early). The system demos: a full
+signed stubbed negotiation runs end to end over Compose.
+**Done:** Docs system; stack decided (D006–D009); repo scaffold
+(FEATURE-001); ACNP spec + protocol library (FEATURE-002/003); merchant
+server (FEATURE-004); buyer agent — mandate boot gate, shortlist with
+hash verification, deterministic strategy + reservation clamp, negotiation
+runner, token-gated `/control/run` (FEATURE-005, D014). Boundary now lives
+in `@negotiator/protocol`.
 **In progress:** —
 **Broken / unverified:** Clamp/replay events are pino-logged, not
 ledger-logged (ledger Day 10). Merchant does not yet handle cart_mandate
-copies or bundle_proposal.
+copies or bundle_proposal. `mandate_register` is built but undeliverable
+until the firewall exists — every buyer session row carries
+`mandate_registered=0` and the runner warns on each run (Day 8 must flip
+this).
 **Do not touch / avoid:** `.env` holds real free-tier keys (gitignored) — the
-keys were pasted in chat and should be rotated before submission.
+keys were pasted in chat and should be rotated before submission. `.env`
+also now holds a locally-generated demo principal keypair + CONTROL_TOKEN.
 `tsconfig.tsbuildinfo` must stay out of the Docker context (see FEATURE-001).
 **Next up (ordered):**
 1. ~~Repo scaffold + Docker Compose skeleton + CI pipeline~~ ✅ FEATURE-001
@@ -26,7 +34,9 @@ keys were pasted in chat and should be rotated before submission.
 3. ~~Message signing + schema validation library (shared)~~ ✅ FEATURE-003
 4. ~~Merchant Commerce Server~~ ✅ FEATURE-004 (catalog, policy, bounds
    engine, deterministic seller strategy, ACNP boundary)
-5. Buyer Agent: intent mandate + discovery + strategy engine (no LLM yet)
+5. ~~Buyer Agent~~ ✅ FEATURE-005 (mandate boot gate, shortlist + hash
+   verification, buyer strategy + clamp, runner, control plane; first
+   E2E negotiation green)
 6. LLM adapter layer + wire LLMs into both agents
 7. End-to-end happy path: negotiate → accept → cart mandate
 8. Settlement: Razorpay test-mode orders + webhooks + receipt
@@ -54,6 +64,24 @@ Format — exactly five lines plus header:
 - Decisions: <"none" or pointer to DECISIONS.md entries added>
 
 <!-- entries begin below -->
+
+### 2026-08-25 02:00 — [Claude Fable 5 (claude-fable-5)]
+- Did: FEATURE-005 buyer agent — boundary moved to @negotiator/protocol;
+  mandate boot gate + demo seed (loudly labeled); deterministic strategy
+  with reservation clamp; shortlist verifying catalog hashes; runner over
+  the sync binding; token-gated /control/run; first E2E (deal closes at
+  ask(4)=417276 round 4; bookend walk-away; tamper/replay rejected).
+- Left: nothing on FEATURE-005. Day 6 next: LLM adapters feeding the
+  proposedPrices seams in decideBuyer/decideSeller.
+- Watch out: every buyer session has mandate_registered=0 until Day 8
+  delivers mandate_register; Message<union> is not a discriminated union
+  (cast body per branch); e2e.test.ts asserts from curve formulas — retune
+  either default curve and the guard test tells you before the E2E lies.
+- Tests: Gate 0 green (151/151); Gate 1 buyer-side incl. tamper+replay
+  over E2E; Gate 2 clamp adversarial + determinism + walk-away; Compose
+  all healthy with a live 13-message signed run (transcript in
+  FEATURE-005).
+- Decisions: D014.
 
 ### 2026-08-24 13:00 — [Claude Fable 5 (claude-fable-5)]
 - Did: FEATURE-004 merchant server — SQLite storage+seed, reusable ACNP
