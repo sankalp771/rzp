@@ -146,7 +146,7 @@ const ITEMS: {
     variants: [
       {
         variant_id: 'var_bookend',
-        attributes: { weight_kg: 2.8 },
+        attributes: { weight_g: 2800 },
         list_price: 520_000,
         floor_price: 500_000,
         stock: 7,
