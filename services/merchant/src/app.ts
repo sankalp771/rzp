@@ -1,6 +1,5 @@
 import Fastify from 'fastify';
-import { PROTOCOL_NAME, PROTOCOL_VERSION } from '@negotiator/protocol';
-import { makeBoundary } from './boundary.js';
+import { PROTOCOL_NAME, PROTOCOL_VERSION, makeBoundary } from '@negotiator/protocol';
 import { openDb, SqliteReplayStore, type MerchantDb } from './db.js';
 import { MerchantHandlers } from './handlers.js';
 import { seedIfEmpty } from './seed.js';

@@ -1,18 +1,15 @@
-import {
-  parseMessage,
-  verifyObject,
-  ReplayGuard,
-  type ErrorCode,
-  type Message,
-  type ReplayStore,
-} from '@negotiator/protocol';
+import { parseMessage } from './validate.js';
+import { verifyObject } from './sign.js';
+import { ReplayGuard, type ReplayStore } from './replay.js';
+import type { ErrorCode } from './errors.js';
+import type { Message } from './schemas/envelope.js';
 
 /**
  * The normative receive pipeline (PROTOCOL.md §3–§6, FLOW F5):
  *   parse/schema → clock skew → key resolution → signature → replay check.
- * Deliberately service-agnostic — no merchant imports — because the buyer
- * (Day 5) and firewall (Day 8) run the identical boundary; it moves to a
- * shared package the moment a second service needs it.
+ * Shared by every service (merchant Day 4, buyer Day 5, firewall Day 8) —
+ * moved here from services/merchant once a second service needed it. Pure
+ * logic: no I/O, no persistence beyond the injected ReplayStore.
  *
  * The replay seq is NOT consumed here: the caller runs its state-machine
  * check on the returned message and calls `commit()` only when the message

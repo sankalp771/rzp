@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { MemoryReplayStore, type Message } from '@negotiator/protocol';
-import { buildMessage, makePrincipal, sampleBodies } from '@negotiator/protocol/fixtures';
-import { generateKeyPair } from '@negotiator/protocol';
+import { generateKeyPair } from './keys.js';
+import { MemoryReplayStore } from './replay.js';
+import type { Message } from './schemas/envelope.js';
+import { buildMessage, makePrincipal, sampleBodies } from './fixtures/index.js';
 import { makeBoundary } from './boundary.js';
 
 const principal = makePrincipal();
@@ -68,7 +69,7 @@ describe('ACNP boundary (F5)', () => {
     expect(receive(stale)).toMatchObject({ ok: false, code: 'CLOCK_SKEW' });
   });
 
-  it('clock-skew window is configurable (amendment #4)', () => {
+  it('clock-skew window is configurable', () => {
     const receive = boundary({ clockSkewSec: 7200 });
     const stale = wire(
       buildMessage('offer', 'buyer', bodies.offer, buyer, {
