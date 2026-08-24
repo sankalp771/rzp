@@ -20,6 +20,10 @@ ARG SERVICE
 ENV NODE_ENV=production SERVICE=${SERVICE}
 WORKDIR /app
 COPY --from=build /app ./
-# Non-root: nothing here needs privileges.
+# Non-root: nothing here needs privileges. data/ is the SQLite home and the
+# only path a service may write; it must exist and belong to node before the
+# privilege drop (bind mounts may mask it — Docker Desktop mounts are
+# permissive, named volumes inherit this ownership).
+RUN mkdir -p /app/data && chown node:node /app/data
 USER node
 CMD ["sh", "-c", "node services/${SERVICE}/dist/main.js"]

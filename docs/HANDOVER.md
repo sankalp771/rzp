@@ -8,14 +8,14 @@ handoff entries scroll down.
 
 ## Current state (edit in place)
 
-**Phase:** Week 1, Day 3 done (a day early).
+**Phase:** Week 1, Day 4 done (a day early).
 **Done:** Docs system; stack decided (D006–D009); repo scaffold — pnpm/TS
 monorepo, 4 fastify service stubs with `/health`, Compose all-healthy, CI
 workflow, `.env.example`, LICENSE, README skeleton (FEATURE-001).
 **In progress:** —
-**Broken / unverified:** Replay rejections are not ledger-logged yet (no
-ledger until Day 10). `ReplayGuard` is in-memory only until services back
-it with SQLite.
+**Broken / unverified:** Clamp/replay events are pino-logged, not
+ledger-logged (ledger Day 10). Merchant does not yet handle cart_mandate
+copies or bundle_proposal.
 **Do not touch / avoid:** `.env` holds real free-tier keys (gitignored) — the
 keys were pasted in chat and should be rotated before submission.
 `tsconfig.tsbuildinfo` must stay out of the Docker context (see FEATURE-001).
@@ -24,7 +24,8 @@ keys were pasted in chat and should be rotated before submission.
 2. ~~PROTOCOL.md v0.1 review pass~~ ✅ FEATURE-002 (D010 mandate
    registration, D011 firewall-owned settlement path)
 3. ~~Message signing + schema validation library (shared)~~ ✅ FEATURE-003
-4. Merchant Commerce Server: catalog + capabilities manifest + policy config
+4. ~~Merchant Commerce Server~~ ✅ FEATURE-004 (catalog, policy, bounds
+   engine, deterministic seller strategy, ACNP boundary)
 5. Buyer Agent: intent mandate + discovery + strategy engine (no LLM yet)
 6. LLM adapter layer + wire LLMs into both agents
 7. End-to-end happy path: negotiate → accept → cart mandate
@@ -53,6 +54,19 @@ Format — exactly five lines plus header:
 - Decisions: <"none" or pointer to DECISIONS.md entries added>
 
 <!-- entries begin below -->
+
+### 2026-08-24 13:00 — [Claude Fable 5 (claude-fable-5)]
+- Did: FEATURE-004 merchant server — SQLite storage+seed, reusable ACNP
+  boundary, session lifecycle, deterministic strategy with bounds clamp.
+  Spec: D013 sync transport binding, 204 rule, seq-consumption rule.
+- Left: boundary.ts moves to a shared package on Day 5; cart_mandate copy
+  handling waits for the firewall.
+- Watch out: catalog attributes must be JCS-safe (integers only — the float
+  ban bit our own seed); Docker runtime needs data/ chowned before USER
+  node; authenticated-but-rejected messages MUST consume seq (§6).
+- Tests: Gate 0 green (115/115); Gate 1 boundary items over HTTP; Gate 2
+  clamp adversarial + determinism; Compose all healthy.
+- Decisions: D013.
 
 ### 2026-08-23 16:00 — [Claude Fable 5 (claude-fable-5)]
 - Did: FEATURE-003 `packages/protocol` — JCS canonicalizer, SHA-256, Ed25519

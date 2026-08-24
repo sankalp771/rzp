@@ -7,8 +7,10 @@
 
 Built for the Razorpay AI Buildathon, Track 1: AI Growth & Agentic Commerce.
 
-**Status:** Day 1 scaffold. Protocol, agents, firewall and settlement land
-over the next two weeks — see [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
+**Status:** Day 4 of 13. Done: ACNP v0.1 spec + protocol library
+(signatures, schemas, replay guard) + merchant server (catalog, policy
+bounds engine, deterministic negotiation). Next: buyer agent, LLM adapters,
+settlement, firewall — see [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
 
 ## Quickstart
 
