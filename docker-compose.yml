@@ -13,7 +13,10 @@ services:
     ports: ['4001:4001']
     environment: { PORT: 4001 }
     volumes:
-      - ./data/merchant:/app/data
+      # Named volume (not a bind mount): inherits /app/data ownership from
+      # the image, so the non-root service can write on any host. Inspect
+      # with `docker compose cp merchant:/app/data/merchant.db .`
+      - merchant-data:/app/data
     healthcheck: &healthcheck
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:$${PORT}/health || exit 1']
       interval: 5s
@@ -47,5 +50,9 @@ services:
     environment: { PORT: 4004 }
     healthcheck: *healthcheck
     volumes:
-      # SQLite ledger persists across restarts; gitignored on the host.
-      - ./data/settlement:/app/data
+      # SQLite ledger persists across restarts (named volume, see merchant).
+      - settlement-data:/app/data
+
+volumes:
+  merchant-data:
+  settlement-data:
