@@ -16,6 +16,22 @@ Entry format:
 
 ---
 
+### D013 — 2026-08-24 — Synchronous transport binding for ACNP v0.1 — [human + Claude Fable 5]
+- **Decision:** v0.1 binds ACNP to synchronous HTTP request/response: the
+  reply message rides in the 200 response body; inherently-async outcomes
+  (escalation, settlement receipt) are polled via signed idempotent status
+  endpoints (PROTOCOL.md §3, §7.9, §7.11). Async delivery noted as a v0.2
+  candidate in Appendix A.
+- **Because:** Debuggability (one request shows both sides of an exchange),
+  and Day 5's stubbed buyer needs no inbound HTTP server; message semantics
+  are binding-independent so nothing is painted into a corner.
+- **Instead of:** Webhook-style async POSTs both ways — more "real" but
+  doubles the surface (two servers, retries, ordering) for zero demo value
+  in a two-week window.
+- **Tradeoff accepted:** Long negotiations hold HTTP connections; polling
+  adds latency to escalation/receipt paths. Both irrelevant at demo scale.
+- **Revisit if:** v0.2, or if a judge asks for true agent-to-agent async.
+
 ### D012 — 2026-08-23 — Ed25519 and SHA-256 via `node:crypto`; JCS hand-rolled — [human + Claude Fable 5]
 - **Decision:** Signatures and hashes use Node 22's built-in `node:crypto`
   (Ed25519 is native since Node 12). RFC 8785 canonicalization is ~30 lines

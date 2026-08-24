@@ -34,6 +34,7 @@ Out of scope for v0.1: multi-merchant discovery, auctions/broadcast negotiation,
 ## 3. Transport and encoding
 
 - Messages are JSON documents sent as the body of HTTP `POST` requests to the counterparty's single ACNP endpoint. The HTTP layer carries no protocol semantics beyond delivery; all meaning lives in the message.
+- **Transport binding (v0.1, normative):** the binding is synchronous request/response. The receiver's reply — the next ACNP message it owes the sender, or a signed `error` message — rides in the HTTP `200` response body, itself fully signed, sequenced and schema-validated like any message. HTTP status codes other than 200 carry no protocol meaning; a sender MUST treat a non-200 or an unparseable response body as delivery failure, not as a protocol reply. Messages whose outcome is inherently asynchronous (an `escalate` verdict pending a human, a `settlement_receipt` pending a payment webhook) are handled by polling a signed, idempotent status endpoint — see §7.9 and §7.11. Asynchronous webhook delivery between agents is a candidate v0.2 binding (Appendix A).
 - Character encoding is UTF-8. Monetary amounts are integers in **minor units** (paise) with an ISO 4217 `currency` field (v0.1 fixes this to INR). Floating-point money is prohibited everywhere, including internally.
 - Timestamps are RFC 3339 UTC with millisecond precision.
 - For signing and hashing, the message MUST be serialized with **JSON Canonicalization Scheme (JCS, RFC 8785)**. Implementations MUST NOT sign pretty-printed or key-order-dependent serializations.
@@ -155,12 +156,14 @@ Every verdict is delivered to both agents so each can advance its own state mach
 - Layer 1 (deterministic policy) runs first and can block alone.
 - Layer 2 (LLM intent-verifier) runs only if layer 1 allows, and can only *recommend*; a deterministic component applies the final verdict.
 - `escalate` parks the settlement in the human approval queue; a queue timeout auto-resolves to `block` (THREAT_MODEL T10) and is itself a ledger event.
+- Synchronous binding (§3): the firewall's HTTP response to `cart_mandate` is the `firewall_verdict` itself for `allow`/`block`, or an `escalate` verdict acknowledging the hold. After `escalate`, the buyer polls `GET /verdict/{cart_mandate_hash}` — an idempotent endpoint returning the latest signed verdict for that hash — until a human decision or queue-timeout auto-block produces a terminal verdict (`layer: human`).
 
 ### 7.10 `settlement_request` (firewall → settlement, only with an `allow` verdict)
 Body: `cart_mandate` (full, still carrying the buyer's signature), `firewall_verdict` (full, carrying the firewall's signature). Settlement MUST, independently of the transport-level envelope check: (a) verify the envelope is signed by the configured firewall key; (b) verify the embedded verdict's own signature; (c) verify `verdict == "allow"` and `verdict.cart_mandate_hash == cart_mandate.mandate_hash` after recomputing that hash itself (`VERDICT_MISMATCH` otherwise); (d) verify the cart mandate's buyer signature. Defense in depth: even a compromised firewall host cannot make settlement accept a mandate the buyer never signed. Settlement then creates a Razorpay test-mode order with the mandate hash as idempotency key, bounded retry with exponential backoff, and awaits webhook confirmation (webhook signature verified; THREAT_MODEL T8).
 
 ### 7.11 `settlement_receipt` (settlement → buyer, seller, ledger)
 Body: `mandate_hash`, `razorpay_order_id`, `status` ∈ `paid` | `failed` | `refunded`, `amount`, `currency`, `timestamp_paid` (absent unless `paid`), `ledger_entry_hash`. The receipt embeds the cart mandate hash, closing the accountability chain: intent → cart → verdict → receipt, every link signed.
+Settlement is asynchronous behind Razorpay's webhook (§3): the immediate HTTP response to `settlement_request` acknowledges acceptance; the parties obtain the receipt by polling `GET /receipt/{mandate_hash}` — idempotent, returning the latest signed `settlement_receipt` or a signed pending status — until `paid` or `failed`.
 
 ### 7.12 `error`
 Body: `code` (from §10), `detail` (string, no secrets), `offending_message_id` if applicable. Errors never advance state; fatal errors (§10) terminate the session.
@@ -232,6 +235,7 @@ An implementation conforms if it: validates schema before processing; verifies e
 
 ## Appendix A — Relationship to AP2, ACP, x402
 
+- **Future transport bindings:** v0.1 is synchronous request/response only (§3). A v0.2 MAY add asynchronous delivery — each party exposes its own ACNP endpoint and messages are POSTed as they occur, with `in_reply_to` carrying correlation — without changing message semantics, since no message's meaning depends on the binding.
 - **AP2:** ACNP adopts AP2's central idea — a verifiable chain from human intent to payment (Intent Mandate → Cart Mandate → authorization) — and its stance that agent autonomy is made safe by *artifacts*, not by trusting agent behavior. ACNP diverges by adding a multi-round negotiation phase between the mandates and by inserting an independent compliance firewall as a mandatory verdict-issuing party.
 - **ACP:** shared goal of standardized agent-to-agent commerce interactions; ACNP is deliberately narrower (one buyer, one seller, one settlement rail) to stay implementable within the buildathon window while remaining honest about that scope.
 - **x402:** shares the HTTP-native, machine-payable philosophy. ACNP does not use HTTP 402 semantics or per-request micropayments; settlement is a single order at the end of a negotiated session. A future minor version could expose firewall verdicts via 402-style challenge responses.
