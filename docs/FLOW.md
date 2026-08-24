@@ -44,8 +44,11 @@ mark the section you are currently modifying with `⚠ UNDER CHANGE — <task>`.
    signature, mandate hash, buyer signature → creates Razorpay order (test
    mode, `mandate_hash` as idempotency key) → payment simulated/authorized in
    test mode → Razorpay webhook → webhook signature verified → settlement
-   confirmed → `settlement_receipt` signed and sent to both agents → final
-   ledger entries → session `SETTLED`.
+   confirmed. Transport (D013): the HTTP response to `settlement_request`
+   only acknowledges acceptance; buyer and seller poll
+   `GET /receipt/{mandate_hash}` (signed, idempotent) until it returns a
+   `settlement_receipt` with `paid` or `failed` → final ledger entries →
+   session `SETTLED`.
 
 The buyer and seller never call Settlement; it accepts requests only from the
 firewall's configured key (D011).
@@ -67,9 +70,13 @@ not a failure of the system.
 - **Block (layer 2 applied):** intent-verifier finds semantic mismatch with
   the Intent Mandate → same closure path, reason includes verifier summary.
 - **Escalate:** verdict `escalate` → session held in `COMPLIANCE_REVIEW` →
-  appears in dashboard approval queue → human approves (verdict re-issued
-  with `layer: human`, resume F1 step 8) or rejects (block closure path).
-  Timeout on the queue → `ESCALATION_TIMEOUT` ledger event → auto-block.
+  appears in dashboard approval queue. Transport (D013): the firewall's HTTP
+  response to `cart_mandate` is the signed `escalate` verdict acknowledging
+  the hold; the buyer then polls `GET /verdict/{cart_mandate_hash}` (signed,
+  idempotent) until a terminal verdict exists. Human approves (verdict
+  re-issued with `layer: human`, resume F1 step 8) or rejects (block closure
+  path). Timeout on the queue → `ESCALATION_TIMEOUT` ledger event →
+  auto-block → the poll returns the `block` verdict.
 - **Flagship demo:** buyer seeded with corrupted goal walks this path and is
   caught between step 7 and 8.
 
