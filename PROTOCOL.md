@@ -72,6 +72,7 @@ Every ACNP message consists of an **envelope** and a type-specific **body**. Env
 
 - Receivers MUST track the highest `seq` seen per (session, sender). A message with `seq` ≤ that value is a replay: reject with `REPLAY_DETECTED`, log to ledger, do not process. A gap (seq jumps by >1) is rejected with `SEQUENCE_GAP`.
 - `message_id` uniqueness is additionally enforced session-wide as a second replay barrier.
+- **Sequence consumption:** a message that passes the boundary checks (schema, version, signature, replay) consumes its `seq` even when it is then rejected with a recoverable error (§10) — the sender continues with the next number. A message rejected at the boundary consumes nothing; the sender retries the same `seq`. Without this split, either an attacker could burn an honest sender's numbers with forged garbage, or a single recoverable rejection would wedge the session in `SEQUENCE_GAP`.
 - Settlement is further guarded by an idempotency key equal to the `cart_mandate` hash (§7.9): repeated `settlement_request`s for the same cart MUST return the original outcome, never create a second order.
 
 ## 7. Message types
