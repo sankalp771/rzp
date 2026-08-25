@@ -34,7 +34,11 @@ importers:
 
   evals: {}
 
-  packages/llm: {}
+  packages/llm:
+    dependencies:
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
 
   packages/protocol:
     dependencies:

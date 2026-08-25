@@ -16,6 +16,49 @@ Entry format:
 
 ---
 
+### D016 — 2026-08-25 — Provider adapters are raw `fetch`; Groq and Mistral share one OpenAI-compatible adapter — [human + Claude Fable 5]
+- **Decision:** No vendor SDKs. `GeminiAdapter` speaks the generativelanguage
+  REST API; `OpenAiCompatAdapter` speaks the chat-completions shape for Groq
+  and Mistral (endpoint selected by `baseUrl`). All calls go through one
+  budgeted `fetchWithBudget`. Model ids are env-overridable with defaults
+  verified live and pinned in code comments.
+- **Because:** CONSTRAINTS #8 is easiest to prove when the only provider
+  code is ~150 lines in one package; three SDKs would triple the
+  supply-chain surface for zero demo value, and the OpenAI shape is the de
+  facto standard so one adapter covers two providers (and any future one).
+- **Instead of:** Official SDKs (heavier, three dependency trees, each with
+  its own retry semantics that would fight our budget); a single aggregator
+  (D008 already rejected OpenRouter).
+- **Tradeoff accepted:** We own the request/response shapes; a provider
+  API change breaks us visibly (the contract suite exists for this — it
+  caught a retired Groq model id and Gemini thinking-token starvation on
+  day one).
+- **Revisit if:** a provider drops its REST shape or json mode.
+
+### D015 — 2026-08-25 — LLMs are advisory with deterministic fallback; no silent stub downgrade — [human + Claude Fable 5]
+- **Decision:** Each side asks its model for `{proposed_prices, rationale}`
+  once per round. Any failure — transport, timeout, rate limit, non-JSON,
+  schema miss, unknown variant id — yields `null` and the deterministic
+  curve proceeds; the fallback is recorded per round (`llm_moves`) and per
+  session. Provider selection: unset → stub; a named provider with a
+  missing key REFUSES TO BOOT; `/health` reports the effective provider.
+  Latency is bounded by an explicit inequality: per-attempt 8s, total
+  proposal budget 12s with retries inside it, buyer HTTP timeout 30s.
+- **Because:** The demo and the 50-session eval must survive free-tier
+  429s and flaky JSON without dying or degrading silently; the safety story
+  (CONSTRAINTS #5/#6) already says the model only proposes, so "model
+  unavailable" is just "no proposal". A silent stub downgrade would let a
+  demo run on canned output while claiming a provider — the worst kind of
+  quiet lie in front of a panel.
+- **Instead of:** Hard-failing the round on LLM error (kills demos on a
+  rate limit); retrying until success (unbounded, violates CONSTRAINTS #10
+  spirit); defaulting to stub when a key is missing (silent downgrade).
+- **Tradeoff accepted:** A run can silently-to-the-counterparty be partly
+  deterministic; mitigated by per-round attribution so the evals report
+  the unusable-output rate per provider honestly.
+- **Revisit if:** the firewall's intent-verifier (Day 9) needs a different
+  failure policy — it must, since "no verdict" cannot mean "allow".
+
 ### D014 — 2026-08-25 — Buyer runs are triggered by a token-gated control endpoint — [human + Claude Fable 5]
 - **Decision:** The buyer exposes `POST /control/run` (shared-secret header
   `x-control-token` = `CONTROL_TOKEN`; refuses to serve when unset), which
