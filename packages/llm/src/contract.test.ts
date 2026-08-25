@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
+import type { LlmAdapter } from './adapter.js';
 import { createAdapterFromEnv, type Provider } from './factory.js';
 import { proposeMove, type NegotiationContext } from './propose.js';
 
@@ -57,8 +58,14 @@ for (const { provider, keyVar } of PROVIDERS) {
   describe.skipIf(!env[keyVar] || env['LLM_CONTRACT'] !== '1')(
     `contract: ${provider} (live)`,
     () => {
-      const adapter = createAdapterFromEnv('SELLER', {
-        env: { ...env, SELLER_LLM_PROVIDER: provider },
+      // Built in a hook, not at describe scope: vitest evaluates skipped
+      // describe bodies during collection, and on a key-less runner the
+      // factory's refuse-to-boot rule would (correctly) throw — BUG-003.
+      let adapter: LlmAdapter;
+      beforeAll(() => {
+        adapter = createAdapterFromEnv('SELLER', {
+          env: { ...env, SELLER_LLM_PROVIDER: provider },
+        });
       });
 
       it('complete() returns non-empty text from the real model', async () => {
