@@ -8,25 +8,31 @@ handoff entries scroll down.
 
 ## Current state (edit in place)
 
-**Phase:** Week 1, Day 5 done (a day early). The system demos: a full
-signed stubbed negotiation runs end to end over Compose.
+**Phase:** Week 1, Day 6 done (a day early). Real models negotiate:
+"Gemini buying from Groq" runs live over Compose with rationales.
 **Done:** Docs system; stack decided (D006–D009); repo scaffold
 (FEATURE-001); ACNP spec + protocol library (FEATURE-002/003); merchant
-server (FEATURE-004); buyer agent — mandate boot gate, shortlist with
-hash verification, deterministic strategy + reservation clamp, negotiation
-runner, token-gated `/control/run` (FEATURE-005, D014). Boundary now lives
-in `@negotiator/protocol`.
+server (FEATURE-004); buyer agent (FEATURE-005, D014); LLM adapter layer —
+Gemini/Groq/Mistral via raw fetch, advisory proposals with deterministic
+fallback, no-silent-stub boot rule, per-round attribution, chaos E2E,
+demo transcript script (FEATURE-006, D015/D016).
 **In progress:** —
-**Broken / unverified:** Clamp/replay events are pino-logged, not
-ledger-logged (ledger Day 10). Merchant does not yet handle cart_mandate
-copies or bundle_proposal. `mandate_register` is built but undeliverable
-until the firewall exists — every buyer session row carries
-`mandate_registered=0` and the runner warns on each run (Day 8 must flip
-this).
-**Do not touch / avoid:** `.env` holds real free-tier keys (gitignored) — the
-keys were pasted in chat and should be rotated before submission. `.env`
-also now holds a locally-generated demo principal keypair + CONTROL_TOKEN.
+**Broken / unverified:** Clamp/replay/fallback events are pino-logged +
+`llm_moves`, not ledger-logged (ledger Day 10). Merchant does not yet
+handle cart_mandate copies or bundle_proposal. `mandate_register` is built
+but undeliverable until the firewall exists — every buyer session row
+carries `mandate_registered=0` and the runner warns on each run (Day 8
+must flip this). Mistral adapter passes the live contract suite but has
+not been used in a full negotiation (amendment: bonus, not blocker).
+**Do not touch / avoid:** `.env` holds real free-tier keys (gitignored).
+**The three keys were pasted in chat (twice) and are NOT yet rotated** —
+rotate in the Gemini/Groq/Mistral consoles and put the new values straight
+into `.env`, never into chat; only then change this line. `.env` also holds
+a locally-generated demo principal keypair + CONTROL_TOKEN.
 `tsconfig.tsbuildinfo` must stay out of the Docker context (see FEATURE-001).
+Provider model ids retire without notice (Groq's llama-3.3-70b did on
+Day 6) — run `LLM_CONTRACT=1 npx vitest run packages/llm/src/contract.test.ts`
+before any demo.
 **Next up (ordered):**
 1. ~~Repo scaffold + Docker Compose skeleton + CI pipeline~~ ✅ FEATURE-001
 2. ~~PROTOCOL.md v0.1 review pass~~ ✅ FEATURE-002 (D010 mandate
@@ -37,7 +43,8 @@ also now holds a locally-generated demo principal keypair + CONTROL_TOKEN.
 5. ~~Buyer Agent~~ ✅ FEATURE-005 (mandate boot gate, shortlist + hash
    verification, buyer strategy + clamp, runner, control plane; first
    E2E negotiation green)
-6. LLM adapter layer + wire LLMs into both agents
+6. ~~LLM adapter layer + wire LLMs into both agents~~ ✅ FEATURE-006
+   (three providers live, advisory-with-fallback, chaos E2E)
 7. End-to-end happy path: negotiate → accept → cart mandate
 8. Settlement: Razorpay test-mode orders + webhooks + receipt
 9. Firewall layer 1 (deterministic), then layer 2 (intent-verifier), then
@@ -64,6 +71,23 @@ Format — exactly five lines plus header:
 - Decisions: <"none" or pointer to DECISIONS.md entries added>
 
 <!-- entries begin below -->
+
+### 2026-08-25 04:30 — [Claude Fable 5 (claude-fable-5)]
+- Did: FEATURE-006 — @negotiator/llm (Gemini + OpenAI-compat adapters via
+  raw fetch, budgeted retries, strict-JSON proposals, env factory with
+  refuse-to-boot rule); both agents wired through the existing clamp
+  seams; per-round llm_moves; chaos E2E; scripts/negotiate.mjs. Live
+  Gemini-vs-Groq run over Compose: 460000 in 4 rounds, 12/12 sigs.
+- Left: nothing on FEATURE-006. Day 7 next: settlement (Razorpay test
+  mode). Keys still NOT rotated — user must do it in the consoles.
+- Watch out: provider model ids retire silently (run the contract suite
+  before demos); Gemini 2.5 needs thinkingBudget 0 for short JSON tasks;
+  Groq gpt-oss 400s in json mode under tiny max_tokens; the LLM buyer
+  concedes faster than the curve — an evals finding, not a bug; the
+  firewall (Day 9) must not inherit D015's fallback-to-proceed policy.
+- Tests: Gate 0 green (185/185 + 6 live contract); Gate 2 chaos E2E +
+  clamp adversarial both sides; Compose healthy with real providers.
+- Decisions: D015, D016.
 
 ### 2026-08-25 02:00 — [Claude Fable 5 (claude-fable-5)]
 - Did: FEATURE-005 buyer agent — boundary moved to @negotiator/protocol;
