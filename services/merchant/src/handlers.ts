@@ -9,9 +9,17 @@ import {
   type Message,
   type MessageType,
 } from '@negotiator/protocol';
+import { StubLlmAdapter, proposeMove, type LlmAdapter, type MoveRecord } from '@negotiator/llm';
 import type { MerchantDb } from './db.js';
-import { loadPolicy, type MerchantPolicy } from './policy.js';
+import { effectiveFloor, loadPolicy, type MerchantPolicy } from './policy.js';
 import { decideSeller, type BuyerOfferView } from './strategy.js';
+
+/** Minimal logger shape so handlers stay free of fastify/pino types. */
+export interface HandlerLog {
+  info(obj: object, msg?: string): void;
+  warn(obj: object, msg?: string): void;
+}
+const NO_LOG: HandlerLog = { info() {}, warn() {} };
 
 /**
  * Merchant-side ACNP handlers: session lifecycle (§7.1–7.4) and the
@@ -50,8 +58,19 @@ export class MerchantHandlers {
     private readonly db: MerchantDb,
     private readonly agentId: string = 'merchant-demo',
     private readonly now: () => Date = () => new Date(),
+    /**
+     * Seller-side model (D015: advisory). The default stub proposes nothing,
+     * so tests and the key-less quickstart run the pure deterministic curve.
+     */
+    private readonly llm: LlmAdapter = new StubLlmAdapter(''),
+    private readonly log: HandlerLog = NO_LOG,
   ) {
     this.policy = loadPolicy(db);
+  }
+
+  /** For /health: what is actually proposing prices on this side. */
+  get llmInfo(): { provider: string; model: string } {
+    return { provider: this.llm.provider, model: this.llm.modelId };
   }
 
   /** Pinned buyer key for the boundary; embedded key for TOFU session_init. */
@@ -64,7 +83,8 @@ export class MerchantHandlers {
     return msg.sender.agent_id === row.buyer_agent_id ? row.buyer_public_key : null;
   }
 
-  handle(msg: Message): HandlerOutcome {
+  /** Async since Day 6: the offer path awaits the (bounded) LLM proposal. */
+  async handle(msg: Message): Promise<HandlerOutcome> {
     switch (msg.type) {
       case 'session_init':
         return this.onSessionInit(msg as Message<'session_init'>);
@@ -110,8 +130,9 @@ export class MerchantHandlers {
     this.db
       .prepare(
         `INSERT INTO sessions (session_id, state, buyer_agent_id, buyer_public_key,
-           seller_agent_id, seller_public_key, seller_private_key, chosen_version, created_at)
-         VALUES (?, 'NEGOTIATING', ?, ?, ?, ?, ?, '0.1', ?)`,
+           seller_agent_id, seller_public_key, seller_private_key, chosen_version,
+           seller_model, created_at)
+         VALUES (?, 'NEGOTIATING', ?, ?, ?, ?, ?, '0.1', ?, ?)`,
       )
       .run(
         msg.session_id,
@@ -120,6 +141,7 @@ export class MerchantHandlers {
         this.agentId,
         seller.publicKey,
         seller.privateKey,
+        this.llm.modelId, // model-per-side recorded in every session (D008)
         this.now().toISOString(),
       );
     const row = this.session(msg.session_id)!;
@@ -178,7 +200,10 @@ export class MerchantHandlers {
     return { reply: this.reply(s, msg, 'catalog_offer', body), commit: true };
   }
 
-  private onBuyerOffer(msg: Message<'offer' | 'counter_offer'>, s: SessionRow): HandlerOutcome {
+  private async onBuyerOffer(
+    msg: Message<'offer' | 'counter_offer'>,
+    s: SessionRow,
+  ): Promise<HandlerOutcome> {
     const body = msg.body;
     // Receiver recomputes the total (§7.5) before any strategy runs.
     const computed = body.line_items.reduce(
@@ -203,21 +228,31 @@ export class MerchantHandlers {
 
     // Resolve every line item against the live catalog.
     const views: BuyerOfferView[] = [];
+    const texts = new Map<string, { title: string; description: string }>();
     let quantityTotal = 0;
     for (const li of body.line_items) {
       const v = this.db
         .prepare(
-          `SELECT v.list_price, v.floor_price, v.stock, i.category
+          `SELECT v.list_price, v.floor_price, v.stock, i.category, i.title, i.description
            FROM variants v JOIN catalog_items i ON i.item_id = v.item_id
            WHERE v.variant_id = ? AND v.item_id = ?`,
         )
         .get(li.variant_id, li.item_id) as
-        { list_price: number; floor_price: number; stock: number; category: string } | undefined;
+        | {
+            list_price: number;
+            floor_price: number;
+            stock: number;
+            category: string;
+            title: string;
+            description: string;
+          }
+        | undefined;
       if (!v || v.stock < li.quantity) {
         return this.protocolError(msg, 'ITEM_UNAVAILABLE', `${li.item_id}/${li.variant_id}`);
       }
       quantityTotal += li.quantity;
       views.push({ line: li, pricing: v });
+      texts.set(li.variant_id, { title: v.title, description: v.description });
     }
     if (quantityTotal > this.policy.max_quantity_per_order) {
       return this.protocolError(
@@ -227,7 +262,28 @@ export class MerchantHandlers {
       );
     }
 
-    const decision = decideSeller(views, round, this.policy);
+    // FLOW F1 step 4: the model drafts a counter WITHIN the envelope (it is
+    // shown the effective floor), then decideSeller clamps whatever came
+    // back. A null proposal means the deterministic curve (D015).
+    const { proposal, record } = await proposeMove(this.llm, {
+      role: 'seller',
+      round,
+      max_rounds: this.policy.max_rounds,
+      currency: 'INR',
+      lines: views.map((v) => ({
+        variant_id: v.line.variant_id,
+        title: texts.get(v.line.variant_id)?.title ?? '',
+        description: texts.get(v.line.variant_id)?.description ?? '',
+        quantity: v.line.quantity,
+        list_price: v.pricing.list_price,
+        counterparty_unit_price: v.line.proposed_unit_price,
+        bound: { kind: 'floor', value: effectiveFloor(v.pricing, this.policy) },
+      })),
+    });
+    this.recordMove(s.session_id, round, record);
+    const proposedPrices = proposal ? new Map(Object.entries(proposal.proposed_prices)) : undefined;
+
+    const decision = decideSeller(views, round, this.policy, proposedPrices);
     this.db.prepare('UPDATE sessions SET round = ? WHERE session_id = ?').run(round, s.session_id);
 
     if (decision.kind === 'accept') {
@@ -242,12 +298,16 @@ export class MerchantHandlers {
         commit: true,
       };
     }
-    // Counter within bounds. Clamp events are logged by strategy via clamp
-    // reasons; persisted for the accept-echo check.
+    // Counter within bounds. Clamp events are pino-logged here (ledger from
+    // Day 10, BOUNDS_CLAMPED); the body is persisted for the accept-echo check.
+    for (const reason of decision.clamp_reasons) {
+      this.log.warn({ session_id: s.session_id, round, reason }, 'BOUNDS_CLAMPED');
+    }
     const counterBody: BodyOf<'counter_offer'> = {
       line_items: decision.line_items,
       total: decision.total,
       round: body.round,
+      ...(proposal ? { rationale: proposal.rationale } : {}),
     };
     this.db
       .prepare('UPDATE sessions SET last_offer_json = ? WHERE session_id = ?')
@@ -274,17 +334,38 @@ export class MerchantHandlers {
 
   // --- plumbing ---------------------------------------------------------
 
-  private inState(
+  private async inState(
     msg: Message,
     allowed: string[],
-    fn: (s: SessionRow) => HandlerOutcome,
-  ): HandlerOutcome {
+    fn: (s: SessionRow) => HandlerOutcome | Promise<HandlerOutcome>,
+  ): Promise<HandlerOutcome> {
     const s = this.session(msg.session_id);
     if (!s) return this.protocolError(msg, 'SESSION_UNKNOWN', msg.session_id);
     if (!allowed.includes(s.state)) {
       return this.protocolError(msg, 'STATE_INVALID', `${msg.type} not valid in ${s.state}`);
     }
     return fn(s);
+  }
+
+  /** Per-round attribution (amendment #3); fallbacks are also warned. */
+  private recordMove(sessionId: string, round: number, r: MoveRecord): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO llm_moves
+           (session_id, round, role, model_id, used_llm, fallback_reason, latency_ms)
+         VALUES (?, ?, 'seller', ?, ?, ?, ?)`,
+      )
+      .run(
+        sessionId,
+        round,
+        r.model_id,
+        r.used_llm ? 1 : 0,
+        r.fallback_reason ?? null,
+        r.latency_ms,
+      );
+    if (!r.used_llm && this.llm.provider !== 'stub') {
+      this.log.warn({ session_id: sessionId, round, ...r }, 'LLM fallback to deterministic curve');
+    }
   }
 
   private session(id: string): SessionRow | undefined {

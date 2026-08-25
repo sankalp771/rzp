@@ -70,7 +70,30 @@ function migrate(db: MerchantDb): void {
       message_id TEXT NOT NULL,
       PRIMARY KEY (session_id, message_id)
     );
+    -- Per-round model attribution (FEATURE-006 amendment #3): which model
+    -- proposed, or why the deterministic curve was used instead. Feeds the
+    -- evals' unusable-output rate per provider.
+    CREATE TABLE IF NOT EXISTS llm_moves (
+      session_id      TEXT NOT NULL,
+      round           INTEGER NOT NULL,
+      role            TEXT NOT NULL,
+      model_id        TEXT NOT NULL,
+      used_llm        INTEGER NOT NULL,
+      fallback_reason TEXT,
+      latency_ms      INTEGER NOT NULL,
+      PRIMARY KEY (session_id, round, role)
+    );
   `);
+  // Day 6 column on a Day 4 table: named volumes persist merchant.db across
+  // image rebuilds, so additive migrations must be idempotent.
+  ensureColumn(db, 'sessions', 'seller_model', 'TEXT');
+}
+
+function ensureColumn(db: MerchantDb, table: string, column: string, decl: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+  }
 }
 
 /** SQLite-backed ReplayStore (interface from @negotiator/protocol). */

@@ -1,4 +1,5 @@
 import Fastify from 'fastify';
+import { createAdapterFromEnv, type LlmAdapter } from '@negotiator/llm';
 import { PROTOCOL_NAME, PROTOCOL_VERSION, makeBoundary } from '@negotiator/protocol';
 import { openDb, SqliteReplayStore, type MerchantDb } from './db.js';
 import { MerchantHandlers } from './handlers.js';
@@ -10,6 +11,8 @@ export interface AppOptions {
   db?: MerchantDb;
   /** Injectable clock for tests (drives skew checks and reply timestamps). */
   now?: () => Date;
+  /** Seller model override for tests; defaults to SELLER_LLM_PROVIDER (D015). */
+  llm?: LlmAdapter;
 }
 
 /**
@@ -23,10 +26,15 @@ export function buildApp(opts: AppOptions = {}) {
   const app = Fastify({ logger: process.env['NODE_ENV'] !== 'test' });
   const db = opts.db ?? openDb();
   if (seedIfEmpty(db)) app.log.info('seeded demo catalog and policy');
+  // A named provider without its key throws here — boot refuses (D015).
+  const llm = opts.llm ?? createAdapterFromEnv('SELLER');
+  app.log.info({ llm: { provider: llm.provider, model: llm.modelId } }, 'seller model');
   const handlers = new MerchantHandlers(
     db,
     process.env['MERCHANT_AGENT_ID'] ?? 'merchant-demo',
     opts.now,
+    llm,
+    app.log,
   );
   const receive = makeBoundary({
     resolveKey: (msg) => handlers.resolveKey(msg),
@@ -40,6 +48,8 @@ export function buildApp(opts: AppOptions = {}) {
     service: SERVICE_NAME,
     protocol: PROTOCOL_NAME,
     version: PROTOCOL_VERSION,
+    // Effective model, so a demo can never quietly run on the stub (D015).
+    llm: handlers.llmInfo,
   }));
 
   app.post('/acnp', async (req, reply) => {
@@ -61,7 +71,7 @@ export function buildApp(opts: AppOptions = {}) {
       );
       return reply.code(200).send(errOutcome.reply);
     }
-    const outcome = handlers.handle(result.message);
+    const outcome = await handlers.handle(result.message);
     if (outcome.commit) result.commit();
     if (outcome.reply === null) return reply.code(204).send();
     return reply.code(200).send(outcome.reply);

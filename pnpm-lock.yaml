@@ -84,6 +84,9 @@ importers:
 
   services/merchant:
     dependencies:
+      '@negotiator/llm':
+        specifier: workspace:*
+        version: link:../../packages/llm
       '@negotiator/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
