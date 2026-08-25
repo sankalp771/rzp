@@ -11,6 +11,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@negotiator/llm": "workspace:*",
     "@negotiator/protocol": "workspace:*",
     "better-sqlite3": "^13.0.3",
     "fastify": "^5.5.0"

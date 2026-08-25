@@ -12,11 +12,13 @@ import {
   type Message,
   type MessageType,
 } from '@negotiator/protocol';
+import { StubLlmAdapter, proposeMove, type LlmAdapter, type MoveRecord } from '@negotiator/llm';
 import { SqliteReplayStore, type BuyerDb } from './db.js';
 import { shortlist } from './shortlist.js';
 import {
   DEFAULT_BUYER_TUNING,
   bidPrice,
+  clampBuyerPrice,
   decideBuyer,
   type BuyerLineView,
   type BuyerParams,
@@ -60,6 +62,8 @@ export interface RunnerDeps {
   now?: () => Date;
   clockSkewSec?: number;
   tuning?: { opening_ratio: number; concession_exponent: number };
+  /** Buyer-side model (D015: advisory). Default stub = pure curve. */
+  llm?: LlmAdapter;
 }
 
 export interface RunOptions {
@@ -75,9 +79,17 @@ export interface RunOptions {
 export interface TranscriptEntry {
   direction: 'sent' | 'received';
   message: Message;
+  /** Buyer offers only: which model proposed the number, or why not (amendment #3). */
+  llm?: MoveRecord;
 }
 
-export interface RunResult {
+/** Per-run LLM usage, mutated by the loop and reported in the result. */
+interface RunStats {
+  calls: number;
+  fallbacks: number;
+}
+
+interface CoreResult {
   session_id: string;
   state: string;
   outcome: 'agreed' | 'walked_away' | 'failed';
@@ -90,6 +102,13 @@ export interface RunResult {
   transcript: TranscriptEntry[];
   /** Human-readable trace of buyer-internal decisions (demo legibility). */
   notes: string[];
+}
+
+export interface RunResult extends CoreResult {
+  /** Demo header material: the story reads top-down from the goal. */
+  mandate: { goal: string; budget_ceiling: number };
+  models: { buyer: string };
+  llm: RunStats;
 }
 
 /** Internal: aborts the run with a protocol-level failure. */
@@ -105,9 +124,11 @@ class RunFailure extends Error {
 export class BuyerRunner {
   private readonly now: () => Date;
   private readonly receive: ReturnType<typeof makeBoundary>;
+  private readonly llm: LlmAdapter;
 
   constructor(private readonly deps: RunnerDeps) {
     this.now = deps.now ?? (() => new Date());
+    this.llm = deps.llm ?? new StubLlmAdapter('');
     this.receive = makeBoundary({
       resolveKey: (msg) => {
         // TOFU (§5): session_ack carries the seller key we pin.
@@ -129,8 +150,8 @@ export class BuyerRunner {
     const key = generateKeyPair();
     db.prepare(
       `INSERT INTO sessions (session_id, state, merchant_url, buyer_agent_id,
-         buyer_public_key, buyer_private_key, mandate_ref, created_at)
-       VALUES (?, 'INIT', ?, ?, ?, ?, ?, ?)`,
+         buyer_public_key, buyer_private_key, mandate_ref, buyer_model, created_at)
+       VALUES (?, 'INIT', ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       sessionId,
       opts.merchantUrl,
@@ -138,11 +159,19 @@ export class BuyerRunner {
       key.publicKey,
       key.privateKey,
       mandateRef,
+      this.llm.modelId, // model-per-side recorded in every session (D008)
       this.now().toISOString(),
     );
 
     const transcript: TranscriptEntry[] = [];
     const notes: string[] = [];
+    const stats: RunStats = { calls: 0, fallbacks: 0 };
+    const decorate = (core: CoreResult): RunResult => ({
+      ...core,
+      mandate: { goal: mandate.goal, budget_ceiling: mandate.budget_ceiling },
+      models: { buyer: this.llm.modelId },
+      llm: stats,
+    });
     // Amendment #3 / D010: the firewall does not exist yet, so the mandate
     // cannot be registered. This is deliberately loud — in the row, in the
     // log, and in the result — so Day 8 finds a TODO in the data.
@@ -153,13 +182,13 @@ export class BuyerRunner {
     notes.push('mandate_registered=false: firewall (Day 8) not yet available to register with');
 
     try {
-      const result = await this.negotiate(sessionId, key, mandate, opts, transcript, notes);
-      return result;
+      const result = await this.negotiate(sessionId, key, mandate, opts, transcript, notes, stats);
+      return decorate(result);
     } catch (err) {
       const failure = err instanceof RunFailure ? err : new RunFailure('INTERNAL', String(err));
       this.setState(sessionId, 'FAILED');
       log.warn({ session_id: sessionId, code: failure.code }, 'negotiation run failed');
-      return {
+      return decorate({
         session_id: sessionId,
         state: 'FAILED',
         outcome: 'failed',
@@ -168,8 +197,76 @@ export class BuyerRunner {
         mandate_registered: false,
         transcript,
         notes: [...notes, `failed: ${failure.code} — ${failure.detail}`],
-      };
+      });
     }
+  }
+
+  /**
+   * FLOW F1 step 3: ask the model for a price + rationale for the buyer's
+   * NEXT offer. Shown its own ceiling (the reservation); the clamp in
+   * strategy.ts enforces it regardless. Null proposal = deterministic curve
+   * (D015). Every call is attributed per round (amendment #3).
+   */
+  private async propose(
+    sessionId: string,
+    nextRound: number,
+    view: BuyerLineView,
+    text: { title: string; description: string },
+    params: BuyerParams,
+    counterparty: number | undefined,
+    mandate: IntentMandate,
+    stats: RunStats,
+    notes: string[],
+  ): Promise<{ prices?: Map<string, number>; rationale?: string; record: MoveRecord }> {
+    const { proposal, record } = await proposeMove(this.llm, {
+      role: 'buyer',
+      round: nextRound,
+      max_rounds: params.max_rounds,
+      currency: 'INR',
+      goal: mandate.goal,
+      preferences: mandate.preferences,
+      lines: [
+        {
+          variant_id: view.variant_id,
+          title: text.title,
+          description: text.description,
+          quantity: view.quantity,
+          list_price: view.list_price,
+          ...(counterparty !== undefined ? { counterparty_unit_price: counterparty } : {}),
+          bound: { kind: 'ceiling', value: view.reservation },
+        },
+      ],
+    });
+    this.deps.db
+      .prepare(
+        `INSERT OR REPLACE INTO llm_moves
+           (session_id, round, role, model_id, used_llm, fallback_reason, latency_ms)
+         VALUES (?, ?, 'buyer', ?, ?, ?, ?)`,
+      )
+      .run(
+        sessionId,
+        nextRound,
+        record.model_id,
+        record.used_llm ? 1 : 0,
+        record.fallback_reason ?? null,
+        record.latency_ms,
+      );
+    stats.calls += 1;
+    if (!record.used_llm) {
+      stats.fallbacks += 1;
+      if (this.llm.provider !== 'stub') {
+        notes.push(`round ${nextRound}: LLM fallback to curve (${record.fallback_reason})`);
+        this.deps.log.warn(
+          { session_id: sessionId, round: nextRound, ...record },
+          'LLM fallback to deterministic curve',
+        );
+      }
+    }
+    return {
+      ...(proposal ? { prices: new Map(Object.entries(proposal.proposed_prices)) } : {}),
+      ...(proposal ? { rationale: proposal.rationale } : {}),
+      record,
+    };
   }
 
   // --- the loop ---------------------------------------------------------
@@ -181,7 +278,8 @@ export class BuyerRunner {
     opts: RunOptions,
     transcript: TranscriptEntry[],
     notes: string[],
-  ): Promise<RunResult> {
+    stats: RunStats,
+  ): Promise<CoreResult> {
     const url = `${opts.merchantUrl.replace(/\/$/, '')}/acnp`;
 
     // 1. session_init → session_ack (TOFU pin).
@@ -265,16 +363,41 @@ export class BuyerRunner {
       deadline: mandate.constraints.deadline,
     };
 
-    // 3. Offer rounds.
+    // 3. Offer rounds. The opening bid may come from the model too — clamped
+    // by clampBuyerPrice exactly like every later round.
+    const text = { title: target.item.title, description: target.item.description };
     let round = 1;
+    const opening = await this.propose(
+      sessionId,
+      1,
+      view,
+      text,
+      params,
+      undefined,
+      mandate,
+      stats,
+      notes,
+    );
+    const openingProposal = opening.prices?.get(view.variant_id);
+    const openingPrice =
+      openingProposal !== undefined
+        ? clampBuyerPrice(openingProposal, view, 1, params)
+        : { price: bidPrice(view, 1, params), clamped: false as const };
+    if (openingPrice.clamped) {
+      notes.push(
+        `clamped: ${view.variant_id}: ${openingPrice.reason} (proposed ${openingProposal})`,
+      );
+    }
     let lineItems: LineItem[] = [
       {
         item_id: view.item_id,
         variant_id: view.variant_id,
         quantity: 1,
-        proposed_unit_price: bidPrice(view, 1, params),
+        proposed_unit_price: openingPrice.price,
       },
     ];
+    let rationale = opening.rationale;
+    let moveRecord = opening.record;
     for (;;) {
       const total = lineItems.reduce((s, li) => s + li.quantity * li.proposed_unit_price, 0);
       this.deps.db
@@ -285,9 +408,10 @@ export class BuyerRunner {
         sessionId,
         key,
         'offer',
-        { line_items: lineItems, total, round },
+        { line_items: lineItems, total, round, ...(rationale ? { rationale } : {}) },
         transcript,
         ['counter_offer', 'accept', 'walk_away'],
+        moveRecord,
       );
 
       // `Message<union>` is not a discriminated union (type and body are
@@ -333,12 +457,26 @@ export class BuyerRunner {
           `seller claimed ${counter.total}, computed ${computed}`,
         );
       }
-      const decision = decideBuyer(
-        counter.line_items.map((line) => ({ line, view })),
-        round,
-        params,
-        this.now,
-      );
+      // Accept / walk-away never depend on the model (pure curve rules), so
+      // decide first and only spend an LLM call when we are going to counter.
+      const counters = counter.line_items.map((line) => ({ line, view }));
+      let decision = decideBuyer(counters, round, params, this.now);
+      if (decision.kind === 'counter') {
+        const next = await this.propose(
+          sessionId,
+          round + 1,
+          view,
+          text,
+          params,
+          counter.line_items[0]!.proposed_unit_price,
+          mandate,
+          stats,
+          notes,
+        );
+        decision = decideBuyer(counters, round, params, this.now, next.prices);
+        rationale = next.rationale;
+        moveRecord = next.record;
+      }
 
       if (decision.kind === 'accept') {
         await this.sendClosing(
@@ -397,9 +535,10 @@ export class BuyerRunner {
     body: unknown,
     transcript: TranscriptEntry[],
     expected: T | T[],
+    llm?: MoveRecord,
   ): Promise<Message<T>> {
     const sent = this.buildOutbound(sessionId, key, type, body);
-    transcript.push({ direction: 'sent', message: sent });
+    transcript.push({ direction: 'sent', message: sent, ...(llm ? { llm } : {}) });
     const res = await this.deps.post(url, sent);
     if (res.status === 204 || res.body === null || res.body === undefined) {
       throw new RunFailure(
@@ -502,8 +641,8 @@ export class BuyerRunner {
     transcript: TranscriptEntry[],
     notes: string[],
     reason?: string,
-    deal?: RunResult['deal'],
-  ): RunResult {
+    deal?: CoreResult['deal'],
+  ): CoreResult {
     return {
       session_id: sessionId,
       state,

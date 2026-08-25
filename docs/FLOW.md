@@ -25,14 +25,21 @@ state.
    with capabilities manifest + chosen version → Buyer verifies compatibility
    → `catalog_request` → `catalog_offer` (with per-item `catalog_hash`).
 3. Buyer Agent internal: shortlist against mandate preferences → strategy
-   engine computes reservation price + opening offer → LLM adapter drafts the
-   rationale text → protocol layer wraps, sequences, signs → send `offer`.
+   engine computes reservation price + opening offer → LLM adapter proposes a
+   price and drafts the rationale text (`proposeMove`, D015: null on any
+   failure → curve) → `clampBuyerPrice` bounds the number → protocol layer
+   wraps, sequences, signs → send `offer`. Per-round attribution lands in
+   `llm_moves`.
 4. Merchant Server: boundary checks (signature, schema, session/sequence
    replay check) → seller policy engine computes allowable response envelope
    (floor, max discount) → LLM adapter drafts counteroffer WITHIN envelope →
    deterministic bounds check on the drafted number (clamp/regenerate if
    breached; `BOUNDS_CLAMPED` ledger event) → sign → respond `counter_offer`
    (or `bundle_proposal` if advertised).
+   **Latency (D013 × D015):** the seller's LLM call runs inside this HTTP
+   reply, so the buyer's client timeout must exceed the seller's whole
+   proposal budget: `BUYER_HTTP_TIMEOUT_MS (30s) > LLM_TOTAL_BUDGET_MS (12s,
+   retries inside) + merchant processing`. Change one, keep the inequality.
 5. Rounds repeat (each message: boundary checks → ledger entry) until Buyer
    strategy decides accept or walk-away.
 6. On accept: Buyer sends `accept` (echoing the accepted line items; seller

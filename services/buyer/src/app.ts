@@ -1,4 +1,5 @@
 import Fastify from 'fastify';
+import { createAdapterFromEnv, type LlmAdapter } from '@negotiator/llm';
 import {
   PROTOCOL_NAME,
   PROTOCOL_VERSION,
@@ -20,6 +21,8 @@ export interface AppOptions {
   /** Mandate override for tests; defaults to env-driven loading. */
   mandate?: IntentMandate;
   controlToken?: string;
+  /** Buyer model override for tests; defaults to BUYER_LLM_PROVIDER (D015). */
+  llm?: LlmAdapter;
 }
 
 /**
@@ -49,12 +52,17 @@ export function buildApp(opts: AppOptions = {}) {
     throw new Error(`refusing to start: Intent Mandate invalid — ${loaded.check.reason}`);
   }
   const mandate = loaded?.check.ok ? loaded.check.mandate : undefined;
+  // A named provider without its key throws here — boot refuses (D015).
+  const llm = opts.llm ?? createAdapterFromEnv('BUYER');
+  app.log.info({ llm: { provider: llm.provider, model: llm.modelId } }, 'buyer model');
 
   app.get('/health', async () => ({
     status: 'ok',
     service: SERVICE_NAME,
     protocol: PROTOCOL_NAME,
     version: PROTOCOL_VERSION,
+    // Effective model, so a demo can never quietly run on the stub (D015).
+    llm: { provider: llm.provider, model: llm.modelId },
   }));
 
   app.post('/control/run', async (req, reply) => {
@@ -82,6 +90,7 @@ export function buildApp(opts: AppOptions = {}) {
       log: app.log,
       ...(opts.now ? { now: opts.now } : {}),
       clockSkewSec: Number(process.env['CLOCK_SKEW_SEC'] ?? 120),
+      llm,
     });
     const result = await runner.run({
       merchantUrl,
@@ -123,11 +132,22 @@ function loadMandate(
   return undefined;
 }
 
+/**
+ * Sync-binding latency inequality (FEATURE-006 amendment #1): the seller's
+ * LLM proposal runs INSIDE the merchant's HTTP reply, bounded by
+ * LLM_TOTAL_BUDGET_MS (12s incl. retries). This client timeout must exceed
+ * that plus merchant processing:
+ *   BUYER_HTTP_TIMEOUT_MS (30 000) > LLM_TOTAL_BUDGET_MS (12 000) + processing
+ * If either env value is changed, keep the inequality — see FLOW.md F1.
+ */
+const BUYER_HTTP_TIMEOUT_MS = Number(process.env['BUYER_HTTP_TIMEOUT_MS'] ?? 30_000);
+
 const fetchPost: PostFn = async (url, payload) => {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(BUYER_HTTP_TIMEOUT_MS),
   });
   return { status: res.status, body: res.status === 204 ? null : await res.json() };
 };

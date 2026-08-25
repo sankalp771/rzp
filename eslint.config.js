@@ -7,6 +7,13 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    // Plain Node scripts (demo/ops tooling) outside the TS packages.
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      globals: { process: 'readonly', console: 'readonly', fetch: 'readonly', URL: 'readonly' },
+    },
+  },
+  {
     rules: {
       // Unused args prefixed with _ are intentional (e.g. fastify handlers).
       '@typescript-eslint/no-unused-vars': [
