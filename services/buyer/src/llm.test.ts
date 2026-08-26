@@ -1,43 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { StubLlmAdapter } from '@negotiator/llm';
-import { generateKeyPair } from '@negotiator/protocol';
-import { buildApp as buildMerchantApp } from '../../merchant/src/app.js';
-import { openDb as openMerchantDb } from '../../merchant/src/db.js';
-import { buildApp } from './app.js';
-import { openDb } from './db.js';
-import { seedDemoMandate } from './mandate.js';
-import type { PostFn, RunResult } from './runner.js';
+import { makeStack } from './stack.testkit.js';
 
 /**
  * FEATURE-006 buyer wiring: the model proposes, clampBuyerPrice disposes.
  * Merchant runs the pure curve (stub) so every expected number is fixed.
  */
-const NOW = () => new Date('2026-08-25T10:00:00.000Z');
-const TOKEN = 't';
 
 async function run(buyerLlm: StubLlmAdapter) {
-  const merchant = buildMerchantApp({ db: openMerchantDb(':memory:'), now: NOW });
-  const post: PostFn = async (_url, payload) => {
-    const res = await merchant.inject({ method: 'POST', url: '/acnp', payload });
-    return { status: res.statusCode, body: res.statusCode === 204 ? null : res.json() };
-  };
-  const db = openDb(':memory:');
-  const buyer = buildApp({
-    db,
-    now: NOW,
-    post,
-    mandate: seedDemoMandate(generateKeyPair(), NOW),
-    controlToken: TOKEN,
-    llm: buyerLlm,
-  });
-  const res = await buyer.inject({
-    method: 'POST',
-    url: '/control/run',
-    headers: { 'x-control-token': TOKEN },
-    payload: { merchant_url: 'http://m' },
-  });
-  const result = res.json() as RunResult;
-  const moves = db
+  const stack = await makeStack({ buyerLlm });
+  const { result } = await stack.run();
+  const moves = stack.buyerDb
     .prepare(
       'SELECT round, used_llm, fallback_reason FROM llm_moves WHERE session_id = ? ORDER BY round',
     )
@@ -46,11 +19,10 @@ async function run(buyerLlm: StubLlmAdapter) {
     used_llm: number;
     fallback_reason: string | null;
   }[];
-  const row = db
+  const row = stack.buyerDb
     .prepare('SELECT buyer_model FROM sessions WHERE session_id = ?')
     .get(result.session_id) as { buyer_model: string };
-  await merchant.close();
-  await buyer.close();
+  await stack.close();
   return { result, moves, row };
 }
 
@@ -70,12 +42,12 @@ describe('buyer LLM wiring (advisory, clamped — CONSTRAINTS #5 mirror)', () =>
       true,
     );
     // The seller accepts an at-list opening immediately → 1 round, 1 LLM call.
-    expect(result.outcome).toBe('agreed');
+    expect(result.outcome).toBe('settled');
     expect(result.deal?.total).toBe(480_000);
     expect(moves).toEqual([{ round: 1, used_llm: 1, fallback_reason: null }]);
     expect(row.buyer_model).toBe('stub/deterministic');
     expect(result.models.buyer).toBe('stub/deterministic');
-    expect(result.mandate).toEqual({
+    expect(result.mandate).toMatchObject({
       goal: 'Anniversary gift for spouse — something thoughtful under budget',
       budget_ceiling: 500_000,
     });
@@ -83,7 +55,7 @@ describe('buyer LLM wiring (advisory, clamped — CONSTRAINTS #5 mirror)', () =>
 
   it('garbage output every round → identical path to the pure curve, fallbacks counted', async () => {
     const { result, moves } = await run(new StubLlmAdapter('nope'));
-    expect(result.outcome).toBe('agreed');
+    expect(result.outcome).toBe('settled');
     expect(result.rounds).toBe(4); // the Day 5 curve crossing, unchanged
     expect(result.llm).toEqual({ calls: 4, fallbacks: 4 }); // opening + 3 counters; accept needs no call
     expect(

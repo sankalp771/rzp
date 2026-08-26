@@ -49,6 +49,24 @@ describe(`${SERVICE_NAME} service`, () => {
     await app.close();
   });
 
+  it('refuses /control/run without a firewall/settlement configured (503) — D010: never unregistered', async () => {
+    const mandate = seedDemoMandate(generateKeyPair(), NOW);
+    const app = buildApp({ db: openDb(':memory:'), now: NOW, mandate, controlToken: 'secret' });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/control/run',
+      headers: { 'x-control-token': 'secret' },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error).toMatch(/FIREWALL_URL/);
+    expect((await app.inject({ method: 'GET', url: '/health' })).json()).toMatchObject({
+      chain_configured: false,
+      mandate: 'option',
+    });
+    await app.close();
+  });
+
   it('refuses to boot on an invalid (tampered) mandate — D010 boot gate', () => {
     const mandate = seedDemoMandate(generateKeyPair(), NOW);
     const tampered = { ...mandate, budget_ceiling: 99_999_999 };

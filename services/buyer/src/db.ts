@@ -36,10 +36,9 @@ function migrate(db: BuyerDb): void {
       buyer_seq         INTEGER NOT NULL DEFAULT 0,  -- our outbound counter
       round             INTEGER NOT NULL DEFAULT 0,
       mandate_ref       TEXT NOT NULL,     -- intent_mandate_ref (§7.1)
-      -- Amendment #3 / D010: 0 until mandate_register is delivered to the
-      -- firewall. No firewall exists until Day 8, so every Day 5 session
-      -- carries a visible 0 here and the runner logs it on every run — the
-      -- integration point is a TODO in the data, not a memory.
+      -- D010: 0 until the firewall acks mandate_register for this run; the
+      -- runner flips it to 1 on the ack and never opens session_init
+      -- without it (Day 5 sessions in old volumes keep their honest 0).
       mandate_registered INTEGER NOT NULL DEFAULT 0,
       created_at        TEXT NOT NULL
     );
@@ -69,6 +68,13 @@ function migrate(db: BuyerDb): void {
   `);
   // Day 6 column on a Day 5 table (buyer.db persists on a named volume).
   ensureColumn(db, 'sessions', 'buyer_model', 'TEXT');
+  // Day 8 (FEATURE-008): the buyer's stream toward the firewall (§6) and
+  // the compliance/settlement legs.
+  ensureColumn(db, 'sessions', 'firewall_seq', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'sessions', 'cart_mandate_hash', 'TEXT');
+  ensureColumn(db, 'sessions', 'verdict', 'TEXT');
+  ensureColumn(db, 'sessions', 'settlement_status', 'TEXT');
+  ensureColumn(db, 'sessions', 'razorpay_order_id', 'TEXT');
 }
 
 function ensureColumn(db: BuyerDb, table: string, column: string, decl: string): void {

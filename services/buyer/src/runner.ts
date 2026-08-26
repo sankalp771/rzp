@@ -4,16 +4,21 @@ import {
   generateKeyPair,
   isFatal,
   makeBoundary,
+  messageSchema,
   signObject,
+  verifyObject,
   type BodyOf,
+  type CatalogItem,
   type ErrorCode,
   type IntentMandate,
+  type KeyPair,
   type LineItem,
   type Message,
   type MessageType,
 } from '@negotiator/protocol';
 import { StubLlmAdapter, proposeMove, type LlmAdapter, type MoveRecord } from '@negotiator/llm';
 import { SqliteReplayStore, type BuyerDb } from './db.js';
+import { buildMandateRegister } from './mandate.js';
 import { shortlist } from './shortlist.js';
 import {
   DEFAULT_BUYER_TUNING,
@@ -25,30 +30,54 @@ import {
 } from './strategy.js';
 
 /**
- * The buyer's negotiation loop (FLOW F1 steps 2–6, F2). Under the sync
+ * The buyer's whole run (FLOW F1 steps 1–8, F2, F3). Under the sync
  * binding (D013) the buyer drives: every send is an HTTP POST to the
- * merchant's /acnp and the counterparty's reply rides back in the 200 body
- * (204 = accepted, nothing owed). EVERY reply passes the same boundary
- * pipeline the merchant runs (F5) before the strategy may look at it.
+ * receiver's /acnp and the reply rides back in the 200 body (204 =
+ * accepted, nothing owed). EVERY reply passes the same boundary pipeline
+ * the receivers run (F5) before any logic may look at it.
  *
- * Sequence bookkeeping (§6): the buyer's outbound counter (buyer_seq) and
- * the seller's inbound counter (replay store) are independent. A reply that
- * passes the boundary consumes the seller's seq immediately — even if the
- * buyer then rejects it semantically — mirroring the merchant's rule, so
- * neither side can wedge the other by sending something authenticated but
- * unwelcome.
+ * Order of legs, and why:
+ *   1. mandate_register → firewall. No ack, no negotiation (D010): an agent
+ *      that has not deposited its authorization must not open a session.
+ *   2. session_init … accept → seller (the Day 5 loop, unchanged).
+ *   3. cart_mandate → seller copy FIRST, then → firewall. The firewall
+ *      delivers its verdict to the seller inside its own handler, so the
+ *      seller must already hold the cart (COMPLIANCE_REVIEW) or the verdict
+ *      would arrive in AGREED and be refused.
+ *   4. poll GET /receipt on settlement until paid | failed | timeout.
+ *
+ * Sequence bookkeeping (§6): streams are per (session, sender, receiver).
+ * The buyer keeps one outbound counter toward the seller (`buyer_seq`) and
+ * one toward the firewall (`firewall_seq`); inbound counters live in the
+ * replay store per sender. A reply that passes the boundary consumes the
+ * sender's seq immediately — even if the buyer then rejects it — mirroring
+ * the receivers' rule, so nobody can wedge anybody with authenticated but
+ * unwelcome messages.
  */
 
 export interface PostResult {
   status: number;
   body: unknown;
 }
-/** Transport seam: tests inject fastify's inject(); production uses fetch. */
+/** Transport seams: tests inject fastify's inject(); production uses fetch. */
 export type PostFn = (url: string, payload: unknown) => Promise<PostResult>;
+export type GetFn = (url: string) => Promise<PostResult>;
 
 export interface RunnerLog {
   info(obj: object, msg?: string): void;
   warn(obj: object, msg?: string): void;
+}
+
+/** The two long-lived counterparties (§5) and how to poll them. */
+export interface BuyerChainConfig {
+  firewallUrl: string;
+  firewallPublicKey: string;
+  settlementUrl: string;
+  settlementPublicKey: string;
+  get: GetFn;
+  pollIntervalMs: number;
+  pollTimeoutMs: number;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export interface RunnerDeps {
@@ -58,6 +87,7 @@ export interface RunnerDeps {
   mandateRef: string;
   agentId: string;
   post: PostFn;
+  chain: BuyerChainConfig;
   log: RunnerLog;
   now?: () => Date;
   clockSkewSec?: number;
@@ -89,16 +119,21 @@ interface RunStats {
   fallbacks: number;
 }
 
+export type RunOutcome = 'settled' | 'pending' | 'blocked' | 'walked_away' | 'failed';
+
 interface CoreResult {
   session_id: string;
   state: string;
-  outcome: 'agreed' | 'walked_away' | 'failed';
-  /** walk_away reason_code or error code, when not agreed. */
+  outcome: RunOutcome;
+  /** walk_away reason_code, verdict reasons, or error code, when not settled. */
   reason?: string;
   rounds: number;
-  /** Always false on Day 5: the firewall (Day 8) is not there to register with. */
+  /** True once the firewall acked mandate_register for this run (D010). */
   mandate_registered: boolean;
   deal?: { line_items: LineItem[]; total: number };
+  cart_mandate_hash?: string;
+  verdict?: BodyOf<'firewall_verdict'>;
+  receipt?: BodyOf<'settlement_receipt'>;
   transcript: TranscriptEntry[];
   /** Human-readable trace of buyer-internal decisions (demo legibility). */
   notes: string[];
@@ -106,9 +141,11 @@ interface CoreResult {
 
 export interface RunResult extends CoreResult {
   /** Demo header material: the story reads top-down from the goal. */
-  mandate: { goal: string; budget_ceiling: number };
+  mandate: { goal: string; budget_ceiling: number; intent_mandate_ref: string };
   models: { buyer: string };
   llm: RunStats;
+  /** So a renderer can re-verify every signature without reading .env. */
+  keys: { firewall: string; settlement: string };
 }
 
 /** Internal: aborts the run with a protocol-level failure. */
@@ -121,6 +158,18 @@ class RunFailure extends Error {
   }
 }
 
+type Receiver = 'seller' | 'firewall';
+type Key = KeyPair;
+
+/** What negotiate() hands to the settlement leg. */
+interface Agreement {
+  line_items: LineItem[];
+  total: number;
+  accepted_message_id: string;
+  seller_agent_id: string;
+  catalog: CatalogItem[];
+}
+
 export class BuyerRunner {
   private readonly now: () => Date;
   private readonly receive: ReturnType<typeof makeBoundary>;
@@ -131,6 +180,8 @@ export class BuyerRunner {
     this.llm = deps.llm ?? new StubLlmAdapter('');
     this.receive = makeBoundary({
       resolveKey: (msg) => {
+        // Long-lived, configured key for the firewall (§5).
+        if (msg.sender.role === 'firewall') return deps.chain.firewallPublicKey;
         // TOFU (§5): session_ack carries the seller key we pin.
         if (msg.type === 'session_ack') {
           return (msg.body as BodyOf<'session_ack'>).seller_public_key;
@@ -168,38 +219,264 @@ export class BuyerRunner {
     const stats: RunStats = { calls: 0, fallbacks: 0 };
     const decorate = (core: CoreResult): RunResult => ({
       ...core,
-      mandate: { goal: mandate.goal, budget_ceiling: mandate.budget_ceiling },
+      mandate: {
+        goal: mandate.goal,
+        budget_ceiling: mandate.budget_ceiling,
+        intent_mandate_ref: mandateRef,
+      },
       models: { buyer: this.llm.modelId },
       llm: stats,
+      keys: {
+        firewall: this.deps.chain.firewallPublicKey,
+        settlement: this.deps.chain.settlementPublicKey,
+      },
     });
-    // Amendment #3 / D010: the firewall does not exist yet, so the mandate
-    // cannot be registered. This is deliberately loud — in the row, in the
-    // log, and in the result — so Day 8 finds a TODO in the data.
-    log.warn(
-      { session_id: sessionId, mandate_registered: false },
-      'mandate_register NOT delivered — firewall lands Day 8; session recorded as unregistered',
-    );
-    notes.push('mandate_registered=false: firewall (Day 8) not yet available to register with');
 
     try {
-      const result = await this.negotiate(sessionId, key, mandate, opts, transcript, notes, stats);
-      return decorate(result);
+      // F1 step 1: no registration, no session (D010).
+      await this.register(sessionId, key, mandate, transcript, notes);
+      const end = await this.negotiate(sessionId, key, mandate, opts, transcript, notes, stats);
+      if (end.kind === 'walked_away') {
+        return decorate(this.finish(sessionId, transcript, notes, 'walked_away', end.reason));
+      }
+      const outcome = await this.settle(sessionId, key, opts, end.agreement, transcript, notes);
+      return decorate(outcome);
     } catch (err) {
       const failure = err instanceof RunFailure ? err : new RunFailure('INTERNAL', String(err));
       this.setState(sessionId, 'FAILED');
       log.warn({ session_id: sessionId, code: failure.code }, 'negotiation run failed');
-      return decorate({
-        session_id: sessionId,
-        state: 'FAILED',
-        outcome: 'failed',
-        reason: failure.code,
-        rounds: this.session(sessionId)?.round ?? 0,
-        mandate_registered: false,
-        transcript,
-        notes: [...notes, `failed: ${failure.code} — ${failure.detail}`],
-      });
+      notes.push(`failed: ${failure.code} — ${failure.detail}`);
+      return decorate(this.finish(sessionId, transcript, notes, 'failed', failure.code));
     }
   }
+
+  // --- leg 1: registration (§7.0) --------------------------------------
+
+  private async register(
+    sessionId: string,
+    key: Key,
+    mandate: IntentMandate,
+    transcript: TranscriptEntry[],
+    notes: string[],
+  ): Promise<void> {
+    const { chain, agentId, db, log } = this.deps;
+    const msg = buildMandateRegister(mandate, key, agentId, this.now);
+    transcript.push({ direction: 'sent', message: msg as Message });
+    let res: PostResult;
+    try {
+      res = await this.deps.post(`${chain.firewallUrl.replace(/\/$/, '')}/acnp`, msg);
+    } catch (err) {
+      throw new RunFailure('FIREWALL_UNREACHABLE', String(err));
+    }
+    const ack = this.acceptReply<'mandate_ack'>(res, 'mandate_ack', sessionId, transcript);
+    if (ack.body.intent_mandate_ref !== this.deps.mandateRef) {
+      throw new RunFailure('MANDATE_CONFLICT', 'firewall acked a different mandate ref');
+    }
+    // Amendment #3 (FEATURE-005) closes here: the row says 1 only after an ack.
+    db.prepare('UPDATE sessions SET mandate_registered = 1 WHERE session_id = ?').run(sessionId);
+    log.info({ session_id: sessionId, ref: this.deps.mandateRef }, 'mandate registered');
+    notes.push(
+      `mandate registered with firewall ${ack.sender.agent_id} (ref ${this.deps.mandateRef.slice(0, 12)}…)`,
+    );
+  }
+
+  // --- leg 3–4: cart, verdict, receipt (§7.8–§7.11) ---------------------
+
+  private async settle(
+    sessionId: string,
+    key: Key,
+    opts: RunOptions,
+    agreement: Agreement,
+    transcript: TranscriptEntry[],
+    notes: string[],
+  ): Promise<CoreResult> {
+    const { chain, agentId, db } = this.deps;
+    const merchantUrl = `${opts.merchantUrl.replace(/\/$/, '')}/acnp`;
+    const firewallUrl = `${chain.firewallUrl.replace(/\/$/, '')}/acnp`;
+
+    // Build the Cart Mandate (§7.8) from the agreed lines and the seller's
+    // exact catalog snapshots; mandate_hash commits to everything else.
+    const line_items = agreement.line_items.map((li) => {
+      const item = agreement.catalog.find((c) => c.item_id === li.item_id);
+      if (!item) throw new RunFailure('INTERNAL', `agreed item ${li.item_id} not in catalog`);
+      const { catalog_hash, ...catalog_item } = item;
+      return {
+        item_id: li.item_id,
+        variant_id: li.variant_id,
+        quantity: li.quantity,
+        unit_price: li.proposed_unit_price,
+        catalog_hash,
+        catalog_item,
+      };
+    });
+    const unhashed = {
+      intent_mandate_ref: this.deps.mandateRef,
+      accepted_message_id: agreement.accepted_message_id,
+      line_items,
+      total: agreement.total,
+      currency: 'INR' as const,
+      seller_agent_id: agreement.seller_agent_id,
+      buyer_agent_id: agentId,
+    };
+    const cart: BodyOf<'cart_mandate'> = { ...unhashed, mandate_hash: hashCanonical(unhashed) };
+    db.prepare('UPDATE sessions SET cart_mandate_hash = ? WHERE session_id = ?').run(
+      cart.mandate_hash,
+      sessionId,
+    );
+    notes.push(`cart mandate ${cart.mandate_hash.slice(0, 12)}… binds accept + snapshot + total`);
+
+    // Seller copy first (see class comment), own envelope on the seller stream.
+    await this.sendClosing(merchantUrl, sessionId, key, 'cart_mandate', cart, transcript, 'seller');
+    // Then the firewall: its reply IS the verdict (allow/block) or an escalate hold.
+    this.setState(sessionId, 'COMPLIANCE_REVIEW');
+    let verdictMsg = await this.exchange<'firewall_verdict'>(
+      firewallUrl,
+      sessionId,
+      key,
+      'cart_mandate',
+      cart,
+      transcript,
+      'firewall_verdict',
+      undefined,
+      'firewall',
+    );
+    if (verdictMsg.body.cart_mandate_hash !== cart.mandate_hash) {
+      throw new RunFailure('VERDICT_MISMATCH', 'verdict is for a different cart');
+    }
+    if (verdictMsg.body.verdict === 'escalate') {
+      notes.push('verdict: escalate — held for a human; polling /verdict');
+      verdictMsg = await this.pollVerdict(cart.mandate_hash, transcript);
+    }
+    const verdict = verdictMsg.body;
+    db.prepare('UPDATE sessions SET verdict = ? WHERE session_id = ?').run(
+      verdict.verdict,
+      sessionId,
+    );
+    if (verdict.verdict === 'block') {
+      this.setState(sessionId, 'BLOCKED');
+      notes.push(`verdict: BLOCK (${verdict.layer}) — ${verdict.reasons.join(', ')}`);
+      return {
+        ...this.finish(sessionId, transcript, notes, 'blocked', verdict.reasons.join(',')),
+        deal: { line_items: agreement.line_items, total: agreement.total },
+        cart_mandate_hash: cart.mandate_hash,
+        verdict,
+      };
+    }
+    notes.push(`verdict: ALLOW (${verdict.layer}) — settlement requested by the firewall`);
+    this.setState(sessionId, 'SETTLING');
+
+    // F1 step 8: poll for the signed receipt (D013).
+    const receipt = await this.pollReceipt(sessionId, cart.mandate_hash, transcript, notes);
+    const base = {
+      deal: { line_items: agreement.line_items, total: agreement.total },
+      cart_mandate_hash: cart.mandate_hash,
+      verdict,
+    };
+    if (!receipt) {
+      // Amendment #4: compliant but unconfirmed — pending, never "paid".
+      db.prepare('UPDATE sessions SET settlement_status = ? WHERE session_id = ?').run(
+        'pending',
+        sessionId,
+      );
+      notes.push(
+        'no receipt within the polling window — outcome pending (settlement may still complete)',
+      );
+      return {
+        ...this.finish(sessionId, transcript, notes, 'pending', 'RECEIPT_TIMEOUT'),
+        ...base,
+      };
+    }
+    db.prepare(
+      'UPDATE sessions SET settlement_status = ?, razorpay_order_id = ? WHERE session_id = ?',
+    ).run(receipt.status, receipt.razorpay_order_id, sessionId);
+    if (receipt.status === 'paid') {
+      this.setState(sessionId, 'SETTLED');
+      notes.push(`receipt: PAID — Razorpay order ${receipt.razorpay_order_id}`);
+      return { ...this.finish(sessionId, transcript, notes, 'settled'), ...base, receipt };
+    }
+    this.setState(sessionId, 'FAILED');
+    notes.push(`receipt: ${receipt.status.toUpperCase()}`);
+    return {
+      ...this.finish(sessionId, transcript, notes, 'failed', 'SETTLEMENT_FAILED'),
+      ...base,
+      receipt,
+    };
+  }
+
+  /** §7.9: after an escalate, poll the firewall until a terminal verdict (Day 9 exercises this). */
+  private async pollVerdict(
+    hash: string,
+    transcript: TranscriptEntry[],
+  ): Promise<Message<'firewall_verdict'>> {
+    const { chain } = this.deps;
+    const url = `${chain.firewallUrl.replace(/\/$/, '')}/verdict/${hash}`;
+    for await (const _tick of this.ticks()) {
+      const res = await chain.get(url).catch(() => null);
+      const parsed = res && messageSchema('firewall_verdict').safeParse(res.body);
+      if (parsed && parsed.success) {
+        const v = parsed.data as unknown as Message<'firewall_verdict'>;
+        if (!verifyObject(v, chain.firewallPublicKey).ok) {
+          throw new RunFailure('SIG_INVALID', 'polled verdict does not verify');
+        }
+        if (v.body.verdict !== 'escalate') {
+          transcript.push({ direction: 'received', message: v });
+          return v;
+        }
+      }
+    }
+    throw new RunFailure('STATE_INVALID', 'no terminal verdict within the polling window');
+  }
+
+  /** §7.11: the latest signed receipt, or null when the bounded window closes. */
+  private async pollReceipt(
+    sessionId: string,
+    hash: string,
+    transcript: TranscriptEntry[],
+    notes: string[],
+  ): Promise<BodyOf<'settlement_receipt'> | null> {
+    const { chain, log } = this.deps;
+    const url = `${chain.settlementUrl.replace(/\/$/, '')}/receipt/${hash}`;
+    let polls = 0;
+    for await (const _tick of this.ticks()) {
+      polls += 1;
+      const res = await chain.get(url).catch((err: unknown) => {
+        log.warn({ session_id: sessionId, error: String(err) }, 'receipt poll failed');
+        return null;
+      });
+      if (!res || res.status !== 200) continue;
+      const parsed = messageSchema('settlement_receipt').safeParse(res.body);
+      if (parsed.success) {
+        const r = parsed.data as unknown as Message<'settlement_receipt'>;
+        if (!verifyObject(r, chain.settlementPublicKey).ok || r.body.mandate_hash !== hash) {
+          throw new RunFailure('SIG_INVALID', 'receipt does not verify against the settlement key');
+        }
+        transcript.push({ direction: 'received', message: r });
+        notes.push(`receipt received after ${polls} poll(s)`);
+        return r.body;
+      }
+      // A signed pending status (§7.11) — verify it too, then keep waiting.
+      const pending = res.body as { status?: string; signature?: unknown };
+      if (pending?.status === 'pending' && !verifyObject(pending, chain.settlementPublicKey).ok) {
+        throw new RunFailure('SIG_INVALID', 'pending status does not verify');
+      }
+    }
+    log.warn({ session_id: sessionId, polls }, 'receipt poll window closed; outcome pending');
+    return null;
+  }
+
+  /** Bounded by wall clock AND poll count, so an injected clock can never spin it. */
+  private async *ticks(): AsyncGenerator<number> {
+    const { chain } = this.deps;
+    const sleep = chain.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    const deadline = this.now().getTime() + chain.pollTimeoutMs;
+    const maxPolls = Math.ceil(chain.pollTimeoutMs / Math.max(chain.pollIntervalMs, 1)) + 1;
+    for (let i = 0; i < maxPolls && this.now().getTime() <= deadline; i++) {
+      yield i;
+      await sleep(chain.pollIntervalMs);
+    }
+  }
+
+  // --- leg 3 helper: the model proposes -----------------------------------
 
   /**
    * FLOW F1 step 3: ask the model for a price + rationale for the buyer's
@@ -269,17 +546,18 @@ export class BuyerRunner {
     };
   }
 
-  // --- the loop ---------------------------------------------------------
+  // --- leg 2: the negotiation loop (F1 steps 2–6, F2) --------------------
 
+  /** Ends in an agreement (→ settle) or a walk-away (state already set, note pushed). */
   private async negotiate(
     sessionId: string,
-    key: { publicKey: string; privateKey: string },
+    key: Key,
     mandate: IntentMandate,
     opts: RunOptions,
     transcript: TranscriptEntry[],
     notes: string[],
     stats: RunStats,
-  ): Promise<CoreResult> {
+  ): Promise<{ kind: 'agreed'; agreement: Agreement } | { kind: 'walked_away'; reason: string }> {
     const url = `${opts.merchantUrl.replace(/\/$/, '')}/acnp`;
 
     // 1. session_init → session_ack (TOFU pin).
@@ -324,24 +602,24 @@ export class BuyerRunner {
     const target = opts.targetVariantId
       ? this.findVariant(catalog.body.items, opts.targetVariantId, mandate)
       : listed.candidates[0];
-    if (!target) {
+    const walkAway = async (reason: BodyOf<'walk_away'>['reason_code'], note: string) => {
       await this.sendClosing(
         url,
         sessionId,
         key,
         'walk_away',
-        { reason_code: 'no_acceptable_terms' },
+        { reason_code: reason },
         transcript,
+        'seller',
       );
       this.setState(sessionId, 'WALKED_AWAY');
-      notes.push('no candidate satisfied the mandate — walked away before offering');
-      return this.finish(
-        sessionId,
-        'WALKED_AWAY',
-        'walked_away',
-        transcript,
-        notes,
+      notes.push(note);
+      return { kind: 'walked_away' as const, reason };
+    };
+    if (!target) {
+      return walkAway(
         'no_acceptable_terms',
+        'no candidate satisfied the mandate — walked away before offering',
       );
     }
     notes.push(
@@ -362,6 +640,13 @@ export class BuyerRunner {
       budget_ceiling: mandate.budget_ceiling,
       deadline: mandate.constraints.deadline,
     };
+    const agreementOf = (line_items: LineItem[], total: number, acceptId: string): Agreement => ({
+      line_items,
+      total,
+      accepted_message_id: acceptId,
+      seller_agent_id: ack.sender.agent_id,
+      catalog: catalog.body.items,
+    });
 
     // 3. Offer rounds. The opening bid may come from the model too — clamped
     // by clampBuyerPrice exactly like every later round.
@@ -426,23 +711,13 @@ export class BuyerRunner {
           throw new RunFailure('ACCEPT_MISMATCH', 'seller accept does not echo our offer');
         this.setState(sessionId, 'AGREED');
         notes.push(`seller accepted our round-${round} offer at ${total}`);
-        return this.finish(sessionId, 'AGREED', 'agreed', transcript, notes, undefined, {
-          line_items: lineItems,
-          total,
-        });
+        return { kind: 'agreed', agreement: agreementOf(lineItems, total, reply.message_id) };
       }
       if (reply.type === 'walk_away') {
         const wa = reply.body as BodyOf<'walk_away'>;
         this.setState(sessionId, 'WALKED_AWAY');
         notes.push(`seller walked away: ${wa.reason_code}`);
-        return this.finish(
-          sessionId,
-          'WALKED_AWAY',
-          'walked_away',
-          transcript,
-          notes,
-          wa.reason_code,
-        );
+        return { kind: 'walked_away', reason: wa.reason_code };
       }
 
       // counter_offer: recompute the total before any strategy runs (§7.5).
@@ -479,7 +754,7 @@ export class BuyerRunner {
       }
 
       if (decision.kind === 'accept') {
-        await this.sendClosing(
+        const accept = await this.sendClosing(
           url,
           sessionId,
           key,
@@ -490,32 +765,19 @@ export class BuyerRunner {
             total: counter.total,
           },
           transcript,
+          'seller',
         );
         this.setState(sessionId, 'AGREED');
         notes.push(`accepted seller counter at ${counter.total} in round ${round}`);
-        return this.finish(sessionId, 'AGREED', 'agreed', transcript, notes, undefined, {
-          line_items: counter.line_items,
-          total: counter.total,
-        });
+        return {
+          kind: 'agreed',
+          agreement: agreementOf(counter.line_items, counter.total, accept.message_id),
+        };
       }
       if (decision.kind === 'walk_away') {
-        await this.sendClosing(
-          url,
-          sessionId,
-          key,
-          'walk_away',
-          { reason_code: decision.reason_code },
-          transcript,
-        );
-        this.setState(sessionId, 'WALKED_AWAY');
-        notes.push(`walked away in round ${round}: ${decision.reason_code}`);
-        return this.finish(
-          sessionId,
-          'WALKED_AWAY',
-          'walked_away',
-          transcript,
-          notes,
+        return walkAway(
           decision.reason_code,
+          `walked away in round ${round}: ${decision.reason_code}`,
         );
       }
       for (const reason of decision.clamp_reasons) notes.push(`clamped: ${reason}`);
@@ -530,16 +792,27 @@ export class BuyerRunner {
   private async exchange<T extends MessageType>(
     url: string,
     sessionId: string,
-    key: { publicKey: string; privateKey: string },
+    key: Key,
     type: MessageType,
     body: unknown,
     transcript: TranscriptEntry[],
     expected: T | T[],
     llm?: MoveRecord,
+    receiver: Receiver = 'seller',
   ): Promise<Message<T>> {
-    const sent = this.buildOutbound(sessionId, key, type, body);
+    const sent = this.buildOutbound(sessionId, key, type, body, receiver);
     transcript.push({ direction: 'sent', message: sent, ...(llm ? { llm } : {}) });
     const res = await this.deps.post(url, sent);
+    return this.acceptReply<T>(res, expected, sessionId, transcript);
+  }
+
+  /** Boundary-check a reply body and require one of the expected types. */
+  private acceptReply<T extends MessageType>(
+    res: PostResult,
+    expected: T | T[],
+    sessionId: string,
+    transcript: TranscriptEntry[],
+  ): Message<T> {
     if (res.status === 204 || res.body === null || res.body === undefined) {
       throw new RunFailure(
         'STATE_INVALID',
@@ -549,10 +822,10 @@ export class BuyerRunner {
     const checked = this.receive(res.body);
     if (!checked.ok) {
       // The reply failed signature/schema/replay checks — it never reaches
-      // the strategy, and it does NOT consume a seller seq (§6).
+      // the strategy, and it does NOT consume the sender's seq (§6).
       throw new RunFailure(checked.code, checked.detail);
     }
-    // Authenticated: consume the seller's seq now, before semantic checks
+    // Authenticated: consume the sender's seq now, before semantic checks
     // (§6 — authenticated-but-rejected still consumes).
     checked.commit();
     transcript.push({ direction: 'received', message: checked.message });
@@ -569,19 +842,20 @@ export class BuyerRunner {
     return msg as Message<T>;
   }
 
-  /** Send a message whose only acceptable reply is 204 (accept, walk_away). */
+  /** Send a message whose only acceptable reply is 204 (accept, walk_away, cart copy). */
   private async sendClosing(
     url: string,
     sessionId: string,
-    key: { publicKey: string; privateKey: string },
+    key: Key,
     type: MessageType,
     body: unknown,
     transcript: TranscriptEntry[],
-  ): Promise<void> {
-    const sent = this.buildOutbound(sessionId, key, type, body);
+    receiver: Receiver,
+  ): Promise<Message> {
+    const sent = this.buildOutbound(sessionId, key, type, body, receiver);
     transcript.push({ direction: 'sent', message: sent });
     const res = await this.deps.post(url, sent);
-    if (res.status === 204) return;
+    if (res.status === 204) return sent;
     // A signed error here is authenticated feedback; surface it.
     const checked = this.receive(res.body);
     if (checked.ok) {
@@ -591,16 +865,17 @@ export class BuyerRunner {
         const err = checked.message.body as BodyOf<'error'>;
         throw new RunFailure(err.code, err.detail);
       }
-      return; // unexpected but authenticated non-error reply: tolerated on close
+      return sent; // unexpected but authenticated non-error reply: tolerated on close
     }
     throw new RunFailure(checked.code, checked.detail);
   }
 
   private buildOutbound(
     sessionId: string,
-    key: { publicKey: string; privateKey: string },
+    key: Key,
     type: MessageType,
     body: unknown,
+    receiver: Receiver,
   ): Message {
     const unsigned = {
       protocol: 'ACNP' as const,
@@ -608,7 +883,7 @@ export class BuyerRunner {
       type,
       message_id: randomUUID(),
       session_id: sessionId,
-      seq: this.nextSeq(sessionId),
+      seq: this.nextSeq(sessionId, receiver),
       sender: { agent_id: this.deps.agentId, role: 'buyer' as const },
       timestamp: this.now().toISOString(),
       body,
@@ -636,21 +911,19 @@ export class BuyerRunner {
 
   private finish(
     sessionId: string,
-    state: string,
-    outcome: RunResult['outcome'],
     transcript: TranscriptEntry[],
     notes: string[],
+    outcome: RunOutcome,
     reason?: string,
-    deal?: CoreResult['deal'],
   ): CoreResult {
+    const row = this.session(sessionId);
     return {
       session_id: sessionId,
-      state,
+      state: row?.state ?? 'FAILED',
       outcome,
       ...(reason !== undefined ? { reason } : {}),
-      rounds: this.session(sessionId)?.round ?? 0,
-      mandate_registered: false,
-      ...(deal !== undefined ? { deal } : {}),
+      rounds: row?.round ?? 0,
+      mandate_registered: (row?.mandate_registered ?? 0) === 1,
       transcript,
       notes,
     };
@@ -658,7 +931,13 @@ export class BuyerRunner {
 
   private session(id: string) {
     return this.deps.db.prepare('SELECT * FROM sessions WHERE session_id = ?').get(id) as
-      | { session_id: string; state: string; seller_public_key: string | null; round: number }
+      | {
+          session_id: string;
+          state: string;
+          seller_public_key: string | null;
+          round: number;
+          mandate_registered: number;
+        }
       | undefined;
   }
 
@@ -668,16 +947,18 @@ export class BuyerRunner {
       .run(state, sessionId);
   }
 
-  private nextSeq(sessionId: string): number {
+  /** Outbound seq on the (session, receiver) stream — §6. */
+  private nextSeq(sessionId: string, receiver: Receiver): number {
+    const col = receiver === 'seller' ? 'buyer_seq' : 'firewall_seq';
     this.deps.db
-      .prepare('UPDATE sessions SET buyer_seq = buyer_seq + 1 WHERE session_id = ?')
+      .prepare(`UPDATE sessions SET ${col} = ${col} + 1 WHERE session_id = ?`)
       .run(sessionId);
     return (
       this.deps.db
-        .prepare('SELECT buyer_seq FROM sessions WHERE session_id = ?')
+        .prepare(`SELECT ${col} AS n FROM sessions WHERE session_id = ?`)
         .get(sessionId) as {
-        buyer_seq: number;
+        n: number;
       }
-    ).buyer_seq;
+    ).n;
   }
 }
