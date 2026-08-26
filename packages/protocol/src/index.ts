@@ -43,5 +43,5 @@ export type { ParseResult } from './validate.js';
 export { MemoryReplayStore, ReplayGuard } from './replay.js';
 export type { ReplayCheckInput, ReplayStore, ReplayVerdict } from './replay.js';
 export { makeBoundary } from './boundary.js';
-export type { BoundaryConfig, BoundaryResult } from './boundary.js';
+export type { BoundaryConfig, BoundaryResult, KeyRejection } from './boundary.js';
 export { exportJsonSchemas } from './jsonschema.js';

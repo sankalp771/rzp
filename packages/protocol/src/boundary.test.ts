@@ -57,6 +57,17 @@ describe('ACNP boundary (F5)', () => {
     expect(receive(msg)).toMatchObject({ ok: false, code: 'SESSION_UNKNOWN' });
   });
 
+  it('resolver may name the rejection (MANDATE_UNKNOWN) — still before signature, no seq consumed', () => {
+    const store = new MemoryReplayStore();
+    const receive = boundary({
+      replayStore: store,
+      resolveKey: () => ({ code: 'MANDATE_UNKNOWN', detail: 'ref not registered' }),
+    });
+    const msg = wire(buildMessage('cart_mandate', 'buyer', bodies.cart_mandate, buyer));
+    expect(receive(msg)).toMatchObject({ ok: false, code: 'MANDATE_UNKNOWN' });
+    expect(store.highestSeq(msg.session_id, msg.sender.agent_id)).toBe(0);
+  });
+
   it('sequence gap → SEQUENCE_GAP; stale timestamp → CLOCK_SKEW', () => {
     const receive = boundary();
     const gap = wire(buildMessage('offer', 'buyer', bodies.offer, buyer, { seq: 3 }));

@@ -16,13 +16,24 @@ import type { Message } from './schemas/envelope.js';
  * is fully accepted, so rejected messages never burn sequence numbers.
  */
 
+/** A resolver may name the rejection instead of the generic SESSION_UNKNOWN. */
+export interface KeyRejection {
+  code: ErrorCode;
+  detail: string;
+}
+
 export interface BoundaryConfig {
   /**
    * Resolve the public key a message must verify against, or null if the
    * sender is unknown. For TOFU messages (session_init/session_ack) return
    * the key embedded in the body — the pipeline verifies self-signature.
+   * Returning a `KeyRejection` rejects with that code in the same pipeline
+   * position as null (before signature verification) — e.g. the firewall
+   * answers a cart for an unregistered mandate with MANDATE_UNKNOWN (§7.8)
+   * rather than SESSION_UNKNOWN. Either way nothing has been authenticated,
+   * so the reply is advisory and no seq is consumed.
    */
-  resolveKey(msg: Message): string | null;
+  resolveKey(msg: Message): string | null | KeyRejection;
   replayStore: ReplayStore;
   /** Max |now - msg.timestamp| in seconds. Spec default 120 (§4). */
   clockSkewSec?: number;
@@ -57,6 +68,7 @@ export function makeBoundary(cfg: BoundaryConfig) {
     if (key === null) {
       return { ok: false, code: 'SESSION_UNKNOWN', detail: `no key for session ${msg.session_id}` };
     }
+    if (typeof key !== 'string') return { ok: false, code: key.code, detail: key.detail };
     const sig = verifyObject(msg, key);
     if (!sig.ok) {
       return { ok: false, code: 'SIG_INVALID', detail: sig.reason };
