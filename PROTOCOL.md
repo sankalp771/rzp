@@ -52,7 +52,7 @@ Every ACNP message consists of an **envelope** and a type-specific **body**. Env
 | `type` | string | MUST | One of the message types in §7 |
 | `message_id` | string (UUIDv4) | MUST | Globally unique per message |
 | `session_id` | string (UUIDv4) | MUST | Constant for the whole session; minted by the buyer in `session_init` |
-| `seq` | integer | MUST | Per-sender, per-session, starts at 1, increments by exactly 1 per message sent |
+| `seq` | integer | MUST | Per (session, sender, receiver) stream — see §6; starts at 1, increments by exactly 1 per message sent on that stream |
 | `in_reply_to` | string | SHOULD | `message_id` of the message being answered; absent only on `mandate_register` and `session_init` |
 | `sender` | object | MUST | `{ agent_id, role }` where role ∈ `buyer` \| `seller` \| `firewall` \| `settlement` |
 | `timestamp` | string | MUST | RFC 3339 UTC; receiver rejects if outside ±120 s of local clock (`CLOCK_SKEW`) |
@@ -71,7 +71,8 @@ Every ACNP message consists of an **envelope** and a type-specific **body**. Env
 ## 6. Ordering, replay, and idempotency
 
 - Receivers MUST track the highest `seq` seen per (session, sender). A message with `seq` ≤ that value is a replay: reject with `REPLAY_DETECTED`, log to ledger, do not process. A gap (seq jumps by >1) is rejected with `SEQUENCE_GAP`.
-- `message_id` uniqueness is additionally enforced session-wide as a second replay barrier.
+- **Streams are per (session, sender, receiver).** A sender that talks to more than one receiver within a session — the buyer (seller and firewall), the firewall (buyer, seller and settlement) — numbers each receiver's stream independently from 1, because each receiver can only observe the messages addressed to it and would otherwise see gaps. Receivers therefore track the highest `seq` per (session, sender) *as seen by them*. A message "copied" to a second receiver (§7.8) is the same body in a fresh envelope on that receiver's stream, not a byte-identical resend.
+- `message_id` uniqueness is additionally enforced session-wide — across all streams and senders — as a second replay barrier; the per-receiver stream rule above does not narrow this.
 - **Sequence consumption:** a message that passes the boundary checks (schema, version, signature, replay) consumes its `seq` even when it is then rejected with a recoverable error (§10) — the sender continues with the next number. A message rejected at the boundary consumes nothing; the sender retries the same `seq`. Without this split, either an attacker could burn an honest sender's numbers with forged garbage, or a single recoverable rejection would wedge the session in `SEQUENCE_GAP`.
 - Settlement is further guarded by an idempotency key equal to the `cart_mandate` hash (§7.9): repeated `settlement_request`s for the same cart MUST return the original outcome, never create a second order.
 
@@ -145,7 +146,7 @@ The bridge from negotiation to money. The firewall MUST reject a `cart_mandate` 
 |---|---|
 | `intent_mandate_ref` | Hash from §7.1 — binds the cart to the original authorization |
 | `accepted_message_id` | The accept that closed the deal |
-| `line_items[]` | Final items with `catalog_hash` per item (binds exact seller snapshot) |
+| `line_items[]` | `{ item_id, variant_id, quantity, unit_price, catalog_hash, catalog_item }`. `catalog_item` is the seller's exact item snapshot as received in `catalog_offer` (§7.4, all fields except `catalog_hash`); `catalog_hash` is the seller's hash over it. Every receiver MUST recompute `catalog_hash` over `catalog_item` and reject a mismatch (firewall: verdict reason `CATALOG_HASH_MISMATCH`; seller: `ACCEPT_MISMATCH`). The firewall reads the seller-declared `category` from the snapshot (§7.9 `CATEGORY_BLOCKED`) — it never sees the catalog otherwise. The seller's copy lets the merchant confirm the snapshot against what it served in this session, so a buyer who relabels an item and re-hashes is provable from the ledger even though the firewall alone cannot detect it (THREAT_MODEL T1; a seller-signed snapshot is a v0.2 candidate) |
 | `total`, `currency` | Final settlement amount, minor units |
 | `seller_agent_id`, `buyer_agent_id` | Parties |
 | `mandate_hash` | Hash of this mandate's canonical form; doubles as the settlement idempotency key |
@@ -153,8 +154,9 @@ The bridge from negotiation to money. The firewall MUST reject a `cart_mandate` 
 Signed by the buyer agent. This is the artifact the firewall audits.
 
 ### 7.9 `firewall_verdict` (firewall → buyer, seller, ledger, dashboard; attached to `settlement_request`)
-Every verdict is delivered to both agents so each can advance its own state machine (§9); `allow` verdicts are additionally carried inside the `settlement_request` the firewall sends to settlement. Body: `cart_mandate_hash`, `verdict` ∈ `allow` | `block` | `escalate`, `layer` ∈ `policy` | `intent_verifier` | `human`, `reasons[]` (machine-readable codes: e.g. `AMOUNT_CAP_EXCEEDED`, `VELOCITY_LIMIT`, `MERCHANT_NOT_ALLOWLISTED`, `CATEGORY_BLOCKED`, `INTENT_DRIFT_QUANTITY`, `INTENT_DRIFT_CATEGORY`, `INTENT_DRIFT_BUDGET`), optional `verifier_summary` (LLM prose, informational). Rules:
+Every verdict is delivered to both agents so each can advance its own state machine (§9); `allow` verdicts are additionally carried inside the `settlement_request` the firewall sends to settlement. Body: `cart_mandate_hash`, `verdict` ∈ `allow` | `block` | `escalate`, `layer` ∈ `policy` | `intent_verifier` | `human`, `reasons[]` (machine-readable codes — layer 1: `AMOUNT_CAP_EXCEEDED`, `QUANTITY_CAP_EXCEEDED`, `CATEGORY_BLOCKED`, `CATALOG_HASH_MISMATCH`, `MERCHANT_NOT_ALLOWLISTED`, `VELOCITY_LIMIT`, `MANDATE_EXPIRED`, `DEADLINE_PASSED`, `MANDATE_ALREADY_USED`, `MANDATE_IN_REVIEW`; layer 2: `INTENT_DRIFT_QUANTITY`, `INTENT_DRIFT_CATEGORY`, `INTENT_DRIFT_BUDGET`), optional `verifier_summary` (LLM prose, informational). Rules:
 - Layer 1 (deterministic policy) runs first and can block alone.
+- **One mandate, one purchase.** An Intent Mandate is consumed by its first `allow` verdict; any later cart bound to the same `intent_mandate_ref` is blocked with `MANDATE_ALREADY_USED`. While a cart on that ref is held in `escalate`, a second cart on it is blocked with `MANDATE_IN_REVIEW` — a pending human decision counts as "in use", so no cart can race an escalation to an `allow`. A `block` does not consume the mandate; the buyer may negotiate a compliant cart. Velocity limits are keyed by `principal_id`, not by mandate, so issuing fresh mandates does not evade them.
 - Layer 2 (LLM intent-verifier) runs only if layer 1 allows, and can only *recommend*; a deterministic component applies the final verdict.
 - `escalate` parks the settlement in the human approval queue; a queue timeout auto-resolves to `block` (THREAT_MODEL T10) and is itself a ledger event.
 - Synchronous binding (§3): the firewall's HTTP response to `cart_mandate` is the `firewall_verdict` itself for `allow`/`block`, or an `escalate` verdict acknowledging the hold. After `escalate`, the buyer polls `GET /verdict/{cart_mandate_hash}` — an idempotent endpoint returning the latest signed verdict for that hash — until a human decision or queue-timeout auto-block produces a terminal verdict (`layer: human`).

@@ -93,9 +93,84 @@
               "catalog_hash": {
                 "type": "string",
                 "pattern": "^[0-9a-f]{64}$"
+              },
+              "catalog_item": {
+                "type": "object",
+                "properties": {
+                  "item_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "title": {
+                    "type": "string",
+                    "maxLength": 4000
+                  },
+                  "description": {
+                    "type": "string",
+                    "maxLength": 4000
+                  },
+                  "category": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "variants": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "variant_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "attributes": {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string"
+                          },
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 200
+                              },
+                              {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "boolean"
+                              }
+                            ]
+                          }
+                        },
+                        "list_price": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "stock": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": ["variant_id", "attributes", "list_price", "stock"]
+                    }
+                  }
+                },
+                "required": ["item_id", "title", "description", "category", "variants"]
               }
             },
-            "required": ["item_id", "variant_id", "quantity", "unit_price", "catalog_hash"]
+            "required": [
+              "item_id",
+              "variant_id",
+              "quantity",
+              "unit_price",
+              "catalog_hash",
+              "catalog_item"
+            ]
           }
         },
         "total": {

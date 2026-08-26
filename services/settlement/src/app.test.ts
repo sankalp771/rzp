@@ -23,7 +23,14 @@ const SECRET = 'whsec_test';
 const firewall = generateKeyPair();
 const settlementKey = generateKeyPair();
 const buyer = generateKeyPair();
-const CATALOG_HASH = hashCanonical({ snapshot: 'vase' });
+const SNAPSHOT = {
+  item_id: 'itm_vase',
+  title: 'Hand-thrown ceramic vase',
+  description: 'Stoneware vase.',
+  category: 'gifts',
+  variants: [{ variant_id: 'var_vase_ash', attributes: {}, list_price: 480_000, stock: 3 }],
+};
+const CATALOG_HASH = hashCanonical(SNAPSHOT);
 
 function makeCart(sessionId: string, total = 417_276, signer = buyer): Message<'cart_mandate'> {
   const cartBody = {
@@ -36,6 +43,7 @@ function makeCart(sessionId: string, total = 417_276, signer = buyer): Message<'
         quantity: 1,
         unit_price: total,
         catalog_hash: CATALOG_HASH,
+        catalog_item: SNAPSHOT,
       },
     ],
     total,

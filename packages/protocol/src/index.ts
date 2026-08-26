@@ -23,6 +23,7 @@ export {
   PROTOCOL_NAME,
   PROTOCOL_VERSION,
   SUPPORTED_MAJOR_VERSIONS,
+  CatalogSnapshot,
   LineItem,
   SignatureSchema,
 } from './schemas/common.js';

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   AgentId,
   Base64Key,
+  CatalogSnapshot,
   Hex64,
   MinorUnits,
   Rfc3339,
@@ -44,7 +45,10 @@ export const CartMandateBody = z.object({
         variant_id: z.string().min(1),
         quantity: z.number().int().positive(),
         unit_price: MinorUnits,
+        /** Seller's hash over `catalog_item`; receivers recompute it (§7.8). */
         catalog_hash: Hex64,
+        /** The seller's exact snapshot from `catalog_offer` — the firewall's only view of the item. */
+        catalog_item: CatalogSnapshot,
       }),
     )
     .min(1),

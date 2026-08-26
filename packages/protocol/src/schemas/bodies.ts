@@ -3,6 +3,7 @@ import { ERROR_CODES } from '../errors.js';
 import {
   AgentId,
   Base64Key,
+  CatalogSnapshot,
   Currency,
   Hex64,
   LineItem,
@@ -24,21 +25,8 @@ const Capabilities = z.object({
   currency: Currency,
 });
 
-const CatalogVariant = z.object({
-  variant_id: z.string().min(1),
-  attributes: z.record(z.string(), z.union([z.string().max(200), z.number().int(), z.boolean()])),
-  list_price: MinorUnits,
-  stock: z.number().int().nonnegative(),
-});
-
-const CatalogItem = z.object({
-  item_id: z.string().min(1),
-  title: UntrustedText,
-  description: UntrustedText,
-  category: z.string().min(1),
-  variants: z.array(CatalogVariant).min(1),
-  catalog_hash: Hex64,
-});
+/** §7.4: the snapshot plus the seller's hash over it. */
+const CatalogItem = CatalogSnapshot.extend({ catalog_hash: Hex64 });
 export type CatalogItem = z.infer<typeof CatalogItem>;
 
 const OfferBody = z.object({

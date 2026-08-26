@@ -38,3 +38,25 @@ export const Terms = z.object({
   delivery_days: z.number().int().nonnegative().optional(),
   notes: UntrustedText.optional(),
 });
+
+export const CatalogVariant = z.object({
+  variant_id: z.string().min(1),
+  attributes: z.record(z.string(), z.union([z.string().max(200), z.number().int(), z.boolean()])),
+  list_price: MinorUnits,
+  stock: z.number().int().nonnegative(),
+});
+
+/**
+ * The seller's exact item snapshot (§7.4 minus `catalog_hash`). It is what
+ * `catalog_hash` is computed over, and — since Day 8 — what a cart mandate
+ * line item carries (§7.8) so the firewall can read the seller-declared
+ * `category` and recompute the hash without ever seeing the catalog.
+ */
+export const CatalogSnapshot = z.object({
+  item_id: z.string().min(1),
+  title: UntrustedText,
+  description: UntrustedText,
+  category: z.string().min(1),
+  variants: z.array(CatalogVariant).min(1),
+});
+export type CatalogSnapshot = z.infer<typeof CatalogSnapshot>;
