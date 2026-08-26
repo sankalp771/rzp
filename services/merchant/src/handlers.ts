@@ -495,8 +495,11 @@ export class MerchantHandlers {
     }
     const sleep = cfg.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     const deadline = this.now().getTime() + cfg.timeoutMs;
+    // Bounded twice (CONSTRAINTS #10 spirit): by wall clock AND by a poll
+    // count, so a frozen or injected clock can never make this loop spin.
+    const maxPolls = Math.ceil(cfg.timeoutMs / Math.max(cfg.intervalMs, 1)) + 1;
     let polls = 0;
-    while (this.now().getTime() <= deadline) {
+    while (this.now().getTime() <= deadline && polls < maxPolls) {
       polls += 1;
       try {
         const res = await cfg.get(`${cfg.url}/receipt/${mandateHash}`, cfg.intervalMs * 4);
@@ -638,15 +641,24 @@ export class MerchantHandlers {
   }
 
   /**
-   * Signed `error` reply (§7.12). Signed with the session key when the
-   * session exists, else the boot-time service key — advisory either way.
-   * Handler-level errors consume the sender's seq (`commit: true`) because
-   * the message was authenticated (PROTOCOL.md §6 sequence consumption);
-   * app.ts ignores the flag for boundary rejections, which never commit.
-   * Fatal codes (§10) terminate the session: state -> FAILED.
+   * Signed `error` reply (§7.12). Handler-level errors (the message WAS
+   * authenticated) consume the sender's seq (`commit: true`, §6), are
+   * signed with the session key on the seller's stream, and — for fatal
+   * codes (§10) — terminate the session: state -> FAILED.
+   *
+   * Boundary rejections (`authenticated: false`) come from a message nobody
+   * has verified: they MUST NOT touch the session — not its state, not the
+   * seller's outbound seq — or anyone who knows a session_id could kill a
+   * live session with garbage (BUG-004). The reply is advisory: signed with
+   * the boot-time service key at seq 1, outside every stream.
    */
-  protocolError(inbound: Message, code: ErrorCode, detail: string): HandlerOutcome {
-    const s = this.session(inbound.session_id);
+  protocolError(
+    inbound: Message,
+    code: ErrorCode,
+    detail: string,
+    { authenticated = true }: { authenticated?: boolean } = {},
+  ): HandlerOutcome {
+    const s = authenticated ? this.session(inbound.session_id) : undefined;
     if (
       s &&
       isFatal(code) &&

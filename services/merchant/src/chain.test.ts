@@ -81,7 +81,9 @@ function makeStack(over: { chain?: ChainConfig; get?: GetFn; now?: () => Date } 
       settlement_status: string | null;
       razorpay_order_id: string | null;
     };
-  return { app, db, buyer, session, send, row };
+  /** §6: a message rejected at the boundary consumed nothing — the sender retries the same seq. */
+  const rewind = (role: string) => seqs.set(role, (seqs.get(role) ?? 1) - 1);
+  return { app, db, buyer, session, send, row, rewind };
 }
 
 type Stack = ReturnType<typeof makeStack>;
@@ -262,9 +264,13 @@ describe('merchant — cart copy (§7.8) and verdict (§7.9)', () => {
   });
 
   it('a verdict signed by anything but the configured firewall key → SIG_INVALID; unconfigured key → SESSION_UNKNOWN', async () => {
-    const s = makeStack();
+    let served: Message | null = null;
+    const s = makeStack({
+      get: async () => ({ status: 200, body: JSON.parse(JSON.stringify(served)) }),
+    });
     const { vase, ask, acceptId } = await reachAgreed(s);
     const cart = cartBody(vase, ask, acceptId);
+    served = receiptFor(cart.mandate_hash);
     await s.send('cart_mandate', 'buyer', cart);
     const forged = await s.send(
       'firewall_verdict',
@@ -273,6 +279,20 @@ describe('merchant — cart copy (§7.8) and verdict (§7.9)', () => {
       generateKeyPair(),
     );
     expect((forged.reply!.body as BodyOf<'error'>).code).toBe('SIG_INVALID');
+    // BUG-004: an unauthenticated message neither advances state nor burns
+    // the seller's stream — the real verdict still lands afterwards.
+    expect(s.row().state).toBe('COMPLIANCE_REVIEW');
+    expect(forged.reply!.seq).toBe(1);
+    s.rewind('firewall'); // nothing was consumed (§6): the real firewall still sends seq 1
+    const real = await s.send('firewall_verdict', 'firewall', {
+      cart_mandate_hash: cart.mandate_hash,
+      verdict: 'allow',
+      layer: 'policy',
+      reasons: [],
+    });
+    expect(real.status).toBe(204);
+    await s.app.handlers.drain();
+    expect(s.row().state).toBe('SETTLED');
 
     const bare = makeStack({ chain: {} });
     const agreed = await reachAgreed(bare);

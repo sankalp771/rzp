@@ -86,6 +86,7 @@ export function buildApp(opts: AppOptions = {}) {
         } as never,
         result.code,
         result.detail,
+        { authenticated: false }, // BUG-004: no state, no seq — nothing was verified
       );
       return reply.code(200).send(errOutcome.reply);
     }
