@@ -8,38 +8,53 @@ handoff entries scroll down.
 
 ## Current state (edit in place)
 
-**Phase:** Week 1, Day 7 done (a day early). Money moves: a firewall-signed
-request became a real Razorpay test-mode order (`order_TULvJMWlrc12qi`)
-with a signed receipt, live over Compose.
+**Phase:** Week 2, Day 8 done. **The F1 chain closes live:** intent →
+registration → negotiation → signed cart → deterministic verdict → real
+Razorpay test order (`order_TUOpxWo7bDMyht`) → signed receipt, every side
+`SETTLED`; and the F3 block demo (`--target var_relay_8ch` →
+`CATEGORY_BLOCKED`, settlement never sees the cart). Tag `known-good-1`.
 **Done:** Docs system; stack decided (D006–D009); repo scaffold
 (FEATURE-001); ACNP spec + protocol library (FEATURE-002/003); merchant
 server (FEATURE-004); buyer agent (FEATURE-005, D014); LLM adapter layer
-(FEATURE-006, D015/D016); settlement service — firewall-only `/acnp` with
-the §7.10 chain, idempotency + crash-recovery lookup, bounded retry,
-webhook HMAC, append-only event chain, signed receipts, payment
-simulation (FEATURE-007, D017/D018; spec fix: `buyer_public_key` in
-`settlement_request`).
+(FEATURE-006, D015/D016); settlement (FEATURE-007, D017/D018); firewall
+layer 1 + verdict applier + settlement dispatch, buyer registration/cart/
+verdict/receipt legs, merchant cart-copy/verdict/receipt legs, demo
+transcript (FEATURE-008, D019/D020; spec: `catalog_item` in cart line
+items, per-receiver seq streams, one-mandate-one-purchase; BUG-004).
 **In progress:** —
-**Broken / unverified:** Clamp/replay/fallback events are pino-logged +
-`llm_moves`; `settlement_events` is its own chain until the Day 10 ledger
-absorbs it. Merchant does not yet handle cart_mandate copies or
-bundle_proposal. `mandate_register` and `cart_mandate` are undeliverable
-until the firewall exists — buyer sessions carry `mandate_registered=0`
-(Day 8 must flip this and send `settlement_request` with the attested
-`buyer_public_key`). In-flight settlements are not resumed after a crash.
-Razorpay's own order status stays `created` (the tap is simulated).
-Mistral: contract suite only.
+**Broken / unverified:** Layer 2 (intent-verifier) and the escalation
+queue do not exist — the applier slot is the literal `not_configured`,
+`/health` says so, and the rule is written in `verdict.ts`: absence →
+escalate, never allow. The buyer's `/verdict` poll loop has no live
+exercise yet. Verdicts live in the firewall's append-only `verdicts`
+table + pino; `settlement_events` is its own chain; `llm_moves`/clamps
+are pino + rows — the Day 10 ledger absorbs all of them. A failed
+settlement dispatch is recorded (`settlement_dispatched=0`) but not
+retried; in-flight settlements are not resumed after a crash. The
+firewall cannot prove the seller produced a cart's snapshot (THREAT_MODEL
+T1 names the v0.2 fix). Razorpay's own order status stays `created` (the
+tap is simulated). Gemini returned 429s mid-run today (quota) → curve
+fallbacks, as designed. The Groq seller quoted its own floor in a
+rationale (informational, floor enforced in code — an evals metric and a
+hardening candidate). `bundle_proposal` unhandled (cut candidate).
+Mistral: contract suite only. Three LLM keys not rotated (final-day
+checklist item).
 **Do not touch / avoid:** `.env` holds real keys (gitignored): Razorpay
-test keys + webhook secret (in), demo principal keypair, CONTROL_TOKEN,
-long-lived FIREWALL/SETTLEMENT keys (generated Day 7). **The three LLM
-keys were pasted in chat (twice) and are NOT yet rotated** — rotate in the
-consoles, put the new values straight into `.env`, never into chat; only
-then change this line and re-run the contract suite. Compose interpolates
-`$` inside `.env` — write `$$` for a literal dollar (bit the webhook
-secret on Day 7). `tsconfig.tsbuildinfo` must stay out of the Docker
-context. Provider model ids retire without notice — run
+test keys + webhook secret, demo principal keypair, CONTROL_TOKEN,
+long-lived FIREWALL/SETTLEMENT keys — `scripts/gen-keys.mjs` regenerates
+the set for a fresh machine. Compose interpolates `$` inside `.env` —
+write `$$` for a literal dollar. `tsconfig.tsbuildinfo` must stay out of
+the Docker context. Provider model ids retire without notice — run
 `LLM_CONTRACT=1 npx vitest run packages/llm/src/contract.test.ts` before
-any demo.
+any demo. Velocity is 10 allows/hour per principal: a demo afternoon or
+the evals run needs `FIREWALL_VELOCITY_MAX` raised (`.env.example` shows
+the override). The merchant seed is additive (`INSERT OR IGNORE`) — new
+demo items appear on the next boot without wiping the volume; never
+change an existing seed row's price (persisted volumes keep the old one).
+Sequence streams are per (session, sender, receiver): a boundary
+rejection consumes nothing, the sender retries the same seq (tests use a
+`rewind` helper). The buyer sends the seller's cart copy BEFORE the
+firewall's — the firewall notifies the seller inside its own handler.
 **Next up (ordered):**
 1. ~~Repo scaffold + Docker Compose skeleton + CI pipeline~~ ✅ FEATURE-001
 2. ~~PROTOCOL.md v0.1 review pass~~ ✅ FEATURE-002 (D010 mandate
@@ -52,12 +67,12 @@ any demo.
    E2E negotiation green)
 6. ~~LLM adapter layer + wire LLMs into both agents~~ ✅ FEATURE-006
    (three providers live, advisory-with-fallback, chaos E2E)
-7. End-to-end happy path: negotiate → accept → cart mandate (closes on
-   Day 8 with the firewall; tag `known-good` #1 then)
+7. ~~End-to-end happy path: negotiate → accept → cart mandate → verdict →
+   receipt~~ ✅ FEATURE-008 (live; tag `known-good-1`)
 8. ~~Settlement: Razorpay test-mode orders + webhooks + receipt~~ ✅
    FEATURE-007 (live against Razorpay test mode)
-9. Firewall layer 1 (deterministic), then layer 2 (intent-verifier), then
-   escalation queue
+9. ~~Firewall layer 1 (deterministic)~~ ✅ FEATURE-008 (D019/D020), then
+   layer 2 (intent-verifier) + escalation queue — Day 9
 10. Audit ledger (hash chain) + verification routine
 11. Dashboard: policy config, approval queue, session replay
 12. Evals harness (50 synthetic negotiations) + metrics report
@@ -80,6 +95,29 @@ Format — exactly five lines plus header:
 - Decisions: <"none" or pointer to DECISIONS.md entries added>
 
 <!-- entries begin below -->
+
+### 2026-08-26 19:30 — [Claude Fable 5 (claude-fable-5)]
+- Did: FEATURE-008 — spec (cart `catalog_item`, per-receiver seq streams,
+  one-mandate-one-purchase incl. pending escalate); boundary resolver
+  codes; firewall storage + layer-1 policy + applier with explicit
+  `not_configured` layer-2 slot; `/acnp` register/audit with settlement
+  dispatch and seller notification inside the verdict (dispatch failure
+  → allow stands, `pending`); merchant cart-copy/verdict/receipt legs;
+  buyer register→cart→verdict→receipt; four-service E2E; demo transcript;
+  BUG-004 fixed; `itm_relay` + additive seeding. Live: SETTLED with a real
+  order, and BLOCKED/CATEGORY_BLOCKED, both read top to bottom.
+- Left: nothing on FEATURE-008. Day 9: layer 2 into the applier slot
+  (absence → escalate), escalation queue + `/verdict` poll live, semantic
+  flagship; Gate 3 items 2 (semantic) and 4.
+- Watch out: velocity 10/hour per principal (raise for demos/evals); the
+  seller model repeats its floor in rationale (hardening candidate);
+  Gemini 429s → curve fallbacks; the RAM kit walks away, the relay blocks
+  — pick the right target for the demo; commits 5/6 were reordered
+  (merchant before buyer) so the E2E has a merchant that accepts carts.
+- Tests: Gate 0 green (267/267 + 6 skipped); Gate 1 spec drift; Gate 3
+  items 1, 3, 5 + item 2 in layer-1 form; Gate 6 four-service E2E;
+  Compose live in live-test mode (settled + blocked transcripts).
+- Decisions: D019, D020.
 
 ### 2026-08-26 15:30 — [Claude Fable 5 (claude-fable-5)]
 - Did: FEATURE-007 settlement — spec fix §7.10 (buyer_public_key attested
