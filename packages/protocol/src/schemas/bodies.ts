@@ -120,6 +120,12 @@ export const BODY_SCHEMAS = {
     cart_mandate: z.looseObject({ signature: SignatureSchema }),
     /** The firewall's full signed firewall_verdict envelope. */
     firewall_verdict: z.looseObject({ signature: SignatureSchema }),
+    /**
+     * The buyer session key the firewall pinned at mandate_register, so
+     * settlement can verify the cart's signature itself (§7.10 d). The
+     * cart's signature.key_id must equal sha256(this key).
+     */
+    buyer_public_key: Base64Key,
   }),
   settlement_receipt: z.object({
     mandate_hash: Hex64,

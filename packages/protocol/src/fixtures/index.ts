@@ -166,6 +166,7 @@ export function sampleBodies(principal: KeyPair, buyer: KeyPair, seller: KeyPair
     settlement_request: {
       cart_mandate: { signature: ZERO_SIG },
       firewall_verdict: { signature: ZERO_SIG },
+      buyer_public_key: buyer.publicKey,
     },
     settlement_receipt: {
       mandate_hash: h,
