@@ -12,9 +12,11 @@
   },
   "dependencies": {
     "@negotiator/protocol": "workspace:*",
+    "better-sqlite3": "^13.0.3",
     "fastify": "^5.5.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "tsx": "^4.20.5"
   }
 }
