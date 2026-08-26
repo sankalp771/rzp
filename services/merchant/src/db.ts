@@ -87,6 +87,17 @@ function migrate(db: MerchantDb): void {
   // Day 6 column on a Day 4 table: named volumes persist merchant.db across
   // image rebuilds, so additive migrations must be idempotent.
   ensureColumn(db, 'sessions', 'seller_model', 'TEXT');
+  // Day 8 columns (FEATURE-008): the seller's side of the compliance and
+  // settlement legs. served_hashes_json = item_id → catalog_hash as served
+  // in THIS session, so a cart copy is checked against what we actually
+  // said, not against whatever the catalog looks like now.
+  ensureColumn(db, 'sessions', 'served_hashes_json', 'TEXT');
+  ensureColumn(db, 'sessions', 'accept_message_id', 'TEXT');
+  ensureColumn(db, 'sessions', 'agreed_json', 'TEXT'); // {line_items, total} at AGREED
+  ensureColumn(db, 'sessions', 'cart_mandate_hash', 'TEXT');
+  ensureColumn(db, 'sessions', 'verdict', 'TEXT');
+  ensureColumn(db, 'sessions', 'settlement_status', 'TEXT');
+  ensureColumn(db, 'sessions', 'razorpay_order_id', 'TEXT');
 }
 
 function ensureColumn(db: MerchantDb, table: string, column: string, decl: string): void {

@@ -3,7 +3,9 @@ import {
   generateKeyPair,
   hashCanonical,
   isFatal,
+  messageSchema,
   signObject,
+  verifyObject,
   type BodyOf,
   type ErrorCode,
   type Message,
@@ -47,12 +49,42 @@ interface SessionRow {
   seller_seq: number;
   round: number;
   last_offer_json: string | null;
+  served_hashes_json: string | null;
+  accept_message_id: string | null;
+  agreed_json: string | null;
+  cart_mandate_hash: string | null;
+}
+
+export interface GetResult {
+  status: number;
+  body: unknown;
+}
+/** Transport seam for the receipt poll; production uses fetch. */
+export type GetFn = (url: string, timeoutMs: number) => Promise<GetResult>;
+
+/**
+ * The seller's view of the compliance + settlement legs (F1 steps 6–8).
+ * Both keys are long-lived and configured (§5); a missing firewall key
+ * means verdicts are rejected as unknown senders, a missing settlement
+ * key means the receipt poll is skipped — both visible in /health.
+ */
+export interface ChainConfig {
+  firewallPublicKey?: string;
+  settlement?: {
+    url: string;
+    publicKey: string;
+    get: GetFn;
+    intervalMs: number;
+    timeoutMs: number;
+    sleep?: (ms: number) => Promise<void>;
+  };
 }
 
 export class MerchantHandlers {
   private readonly policy: MerchantPolicy;
   /** Boot-time fallback key: signs error replies for unknown sessions. */
   private readonly serviceKey = generateKeyPair();
+  private readonly inflight = new Set<Promise<void>>();
 
   constructor(
     private readonly db: MerchantDb,
@@ -64,6 +96,7 @@ export class MerchantHandlers {
      */
     private readonly llm: LlmAdapter = new StubLlmAdapter(''),
     private readonly log: HandlerLog = NO_LOG,
+    private readonly chain: ChainConfig = {},
   ) {
     this.policy = loadPolicy(db);
   }
@@ -73,11 +106,28 @@ export class MerchantHandlers {
     return { provider: this.llm.provider, model: this.llm.modelId };
   }
 
-  /** Pinned buyer key for the boundary; embedded key for TOFU session_init. */
+  /** For /health: which legs of the chain this merchant can verify. */
+  get chainInfo(): { firewall_key_configured: boolean; settlement_key_configured: boolean } {
+    return {
+      firewall_key_configured: Boolean(this.chain.firewallPublicKey),
+      settlement_key_configured: Boolean(this.chain.settlement),
+    };
+  }
+
+  /** Tests await this so the async receipt poll is observable without timers. */
+  async drain(): Promise<void> {
+    while (this.inflight.size > 0) await Promise.all([...this.inflight]);
+  }
+
+  /**
+   * Pinned buyer key for the boundary; embedded key for TOFU session_init;
+   * the configured long-lived key for the firewall's verdicts (§5).
+   */
   resolveKey(msg: Message): string | null {
     if (msg.type === 'session_init') {
       return (msg.body as BodyOf<'session_init'>).buyer_public_key;
     }
+    if (msg.sender.role === 'firewall') return this.chain.firewallPublicKey ?? null;
     const row = this.session(msg.session_id);
     if (!row) return null;
     return msg.sender.agent_id === row.buyer_agent_id ? row.buyer_public_key : null;
@@ -100,6 +150,14 @@ export class MerchantHandlers {
       case 'accept':
         return this.inState(msg, ['NEGOTIATING'], (s) =>
           this.onAccept(msg as Message<'accept'>, s),
+        );
+      case 'cart_mandate':
+        return this.inState(msg, ['AGREED'], (s) =>
+          this.onCartMandate(msg as Message<'cart_mandate'>, s),
+        );
+      case 'firewall_verdict':
+        return this.inState(msg, ['COMPLIANCE_REVIEW'], (s) =>
+          this.onFirewallVerdict(msg as Message<'firewall_verdict'>, s),
         );
       case 'reject':
         // Buyer declined our counter; session stays NEGOTIATING, nothing owed.
@@ -197,6 +255,14 @@ export class MerchantHandlers {
         return { ...snapshot, catalog_hash: hashCanonical(snapshot) };
       }),
     };
+    // Remember what we served in this session: the cart copy (§7.8) is
+    // checked against these hashes, so a later stock change cannot cause a
+    // false mismatch and a buyer's relabelled snapshot cannot pass.
+    const served = { ...JSON.parse(s.served_hashes_json ?? '{}') } as Record<string, string>;
+    for (const it of body.items) served[it.item_id] = it.catalog_hash;
+    this.db
+      .prepare('UPDATE sessions SET served_hashes_json = ? WHERE session_id = ?')
+      .run(JSON.stringify(served), s.session_id);
     return { reply: this.reply(s, msg, 'catalog_offer', body), commit: true };
   }
 
@@ -288,15 +354,13 @@ export class MerchantHandlers {
 
     if (decision.kind === 'accept') {
       // We accept the buyer's numbers verbatim (echo rule §7.7).
-      this.setState(s.session_id, 'AGREED');
-      return {
-        reply: this.reply(s, msg, 'accept', {
-          accepted_message_id: msg.message_id,
-          line_items: body.line_items,
-          total: body.total,
-        }),
-        commit: true,
-      };
+      const accept = this.reply(s, msg, 'accept', {
+        accepted_message_id: msg.message_id,
+        line_items: body.line_items,
+        total: body.total,
+      });
+      this.agree(s.session_id, accept.message_id, body.line_items, body.total);
+      return { reply: accept, commit: true };
     }
     // Counter within bounds. Clamp events are pino-logged here (ledger from
     // Day 10, BOUNDS_CLAMPED); the body is persisted for the accept-echo check.
@@ -328,8 +392,171 @@ export class MerchantHandlers {
       this.setState(s.session_id, 'FAILED');
       return this.protocolError(msg, 'ACCEPT_MISMATCH', 'echo does not match our offer');
     }
-    this.setState(s.session_id, 'AGREED');
+    this.agree(s.session_id, msg.message_id, last.line_items, last.total);
     return { reply: null, commit: true };
+  }
+
+  /**
+   * §7.8 seller copy of the cart mandate. We verify it binds exactly the
+   * deal we closed — the accept that closed it, the agreed items and
+   * prices, and the catalog snapshots we served in this session — and park
+   * the session in COMPLIANCE_REVIEW awaiting the firewall's verdict. A
+   * cart that says anything else is an ACCEPT_MISMATCH (fatal): a buyer
+   * cannot quietly settle different terms than it agreed.
+   */
+  private onCartMandate(msg: Message<'cart_mandate'>, s: SessionRow): HandlerOutcome {
+    const body = msg.body;
+    const agreed = JSON.parse(s.agreed_json ?? 'null') as {
+      line_items: BodyOf<'accept'>['line_items'];
+      total: number;
+    } | null;
+    const served = JSON.parse(s.served_hashes_json ?? '{}') as Record<string, string>;
+    const mismatch = (why: string) => {
+      this.setState(s.session_id, 'FAILED');
+      return this.protocolError(msg, 'ACCEPT_MISMATCH', why);
+    };
+    if (!agreed || body.accepted_message_id !== s.accept_message_id) {
+      return mismatch('accepted_message_id is not the accept that closed this deal');
+    }
+    if (body.seller_agent_id !== s.seller_agent_id || body.buyer_agent_id !== s.buyer_agent_id) {
+      return mismatch('parties differ from the session');
+    }
+    const { mandate_hash, ...minus } = body;
+    if (hashCanonical(minus) !== mandate_hash) {
+      return mismatch('mandate_hash does not match the cart body');
+    }
+    // Same items, quantities and prices as agreed, as a set.
+    const key = (li: { item_id: string; variant_id: string; quantity: number }, price: number) =>
+      `${li.item_id}/${li.variant_id}×${li.quantity}@${price}`;
+    const agreedKeys = agreed.line_items.map((li) => key(li, li.proposed_unit_price)).sort();
+    const cartKeys = body.line_items.map((li) => key(li, li.unit_price)).sort();
+    if (JSON.stringify(agreedKeys) !== JSON.stringify(cartKeys) || body.total !== agreed.total) {
+      return mismatch('line items or total differ from the agreed deal');
+    }
+    for (const li of body.line_items) {
+      // The snapshot must be the one we served, and the hash must commit to it.
+      if (
+        served[li.item_id] !== li.catalog_hash ||
+        hashCanonical(li.catalog_item) !== li.catalog_hash
+      ) {
+        return mismatch(`${li.item_id}: catalog snapshot is not the one served in this session`);
+      }
+    }
+    this.db
+      .prepare(
+        `UPDATE sessions SET state = 'COMPLIANCE_REVIEW', cart_mandate_hash = ? WHERE session_id = ?`,
+      )
+      .run(mandate_hash, s.session_id);
+    this.log.info(
+      { session_id: s.session_id, mandate_hash },
+      'cart copy verified; awaiting verdict',
+    );
+    return { reply: null, commit: true };
+  }
+
+  /**
+   * §7.9: the firewall's verdict for our session, verified against the
+   * configured firewall key by the boundary. allow → SETTLING and poll the
+   * receipt; block → BLOCKED; escalate → stay in review (Day 9).
+   */
+  private onFirewallVerdict(msg: Message<'firewall_verdict'>, s: SessionRow): HandlerOutcome {
+    const body = msg.body;
+    if (body.cart_mandate_hash !== s.cart_mandate_hash) {
+      return this.protocolError(msg, 'STATE_INVALID', 'verdict is for a different cart');
+    }
+    this.db
+      .prepare('UPDATE sessions SET verdict = ? WHERE session_id = ?')
+      .run(body.verdict, s.session_id);
+    this.log[body.verdict === 'allow' ? 'info' : 'warn'](
+      { session_id: s.session_id, verdict: body.verdict, layer: body.layer, reasons: body.reasons },
+      'firewall_verdict received',
+    );
+    if (body.verdict === 'block') {
+      this.setState(s.session_id, 'BLOCKED');
+    } else if (body.verdict === 'allow') {
+      this.setState(s.session_id, 'SETTLING');
+      this.track(this.pollReceipt(s.session_id, body.cart_mandate_hash));
+    }
+    return { reply: null, commit: true };
+  }
+
+  /**
+   * F1 step 8, seller side: poll GET /receipt/{mandate_hash} on settlement
+   * (D013) until a signed settlement_receipt says paid or failed, or the
+   * bounded window closes. Without a configured settlement key the poll is
+   * skipped and the session stays SETTLING — visible in the row and log.
+   */
+  private async pollReceipt(sessionId: string, mandateHash: string): Promise<void> {
+    const cfg = this.chain.settlement;
+    if (!cfg) {
+      this.log.warn({ session_id: sessionId }, 'SETTLEMENT_* not configured: receipt not polled');
+      this.setSettlement(sessionId, 'not_polled', null);
+      return;
+    }
+    const sleep = cfg.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    const deadline = this.now().getTime() + cfg.timeoutMs;
+    let polls = 0;
+    while (this.now().getTime() <= deadline) {
+      polls += 1;
+      try {
+        const res = await cfg.get(`${cfg.url}/receipt/${mandateHash}`, cfg.intervalMs * 4);
+        const parsed = messageSchema('settlement_receipt').safeParse(res.body);
+        if (res.status === 200 && parsed.success) {
+          const receipt = parsed.data as unknown as Message<'settlement_receipt'>;
+          const sig = verifyObject(receipt, cfg.publicKey);
+          if (!sig.ok || receipt.body.mandate_hash !== mandateHash) {
+            this.log.warn({ session_id: sessionId }, 'receipt rejected: bad signature or hash');
+            this.setSettlement(sessionId, 'receipt_invalid', null);
+            return;
+          }
+          this.setSettlement(sessionId, receipt.body.status, receipt.body.razorpay_order_id);
+          this.setState(sessionId, receipt.body.status === 'paid' ? 'SETTLED' : 'FAILED');
+          this.log.info(
+            { session_id: sessionId, status: receipt.body.status, polls },
+            'settlement_receipt received',
+          );
+          return;
+        }
+      } catch (err) {
+        this.log.warn({ session_id: sessionId, error: String(err) }, 'receipt poll failed');
+      }
+      await sleep(cfg.intervalMs);
+    }
+    this.log.warn(
+      { session_id: sessionId, polls },
+      'receipt poll timed out; session stays SETTLING',
+    );
+    this.setSettlement(sessionId, 'pending', null);
+  }
+
+  private track(p: Promise<void>): void {
+    const wrapped = p
+      .catch((err) => this.log.warn({ err: String(err) }, 'receipt poll crashed'))
+      .finally(() => this.inflight.delete(wrapped));
+    this.inflight.add(wrapped);
+  }
+
+  private setSettlement(sessionId: string, status: string, orderId: string | null): void {
+    this.db
+      .prepare(
+        'UPDATE sessions SET settlement_status = ?, razorpay_order_id = ? WHERE session_id = ?',
+      )
+      .run(status, orderId, sessionId);
+  }
+
+  /** NEGOTIATING → AGREED, remembering exactly what was agreed (§7.7/§7.8). */
+  private agree(
+    sessionId: string,
+    acceptMessageId: string,
+    lineItems: BodyOf<'accept'>['line_items'],
+    total: number,
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE sessions SET state = 'AGREED', accept_message_id = ?, agreed_json = ?
+         WHERE session_id = ?`,
+      )
+      .run(acceptMessageId, JSON.stringify({ line_items: lineItems, total }), sessionId);
   }
 
   // --- plumbing ---------------------------------------------------------
