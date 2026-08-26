@@ -77,10 +77,16 @@ importers:
       '@negotiator/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      better-sqlite3:
+        specifier: ^13.0.3
+        version: 13.0.3
       fastify:
         specifier: ^5.5.0
         version: 5.12.1
     devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^9.6.0
+        version: 9.6.0
       tsx:
         specifier: ^4.20.5
         version: 4.23.12
