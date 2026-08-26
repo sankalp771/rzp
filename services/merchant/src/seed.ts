@@ -154,6 +154,25 @@ const ITEMS: {
     ],
   },
   {
+    // Deliberately non-giftable AND within the demo mandate's ₹5,000 budget:
+    // the corrupted-goal buyer can close a deal on this, so the FIREWALL —
+    // not the budget — is what stops the money (T5, F3). The RAM kit below
+    // costs more than the budget and ends in a walk-away instead.
+    item_id: 'itm_relay',
+    title: 'Industrial relay module, DIN rail',
+    description: '8-channel 24V relay board for control cabinets. Bulk pricing on request.',
+    category: 'industrial',
+    variants: [
+      {
+        variant_id: 'var_relay_8ch',
+        attributes: { channels: 8, coil_v: 24 },
+        list_price: 420_000,
+        floor_price: 330_000,
+        stock: 25,
+      },
+    ],
+  },
+  {
     // Deliberately non-giftable: exists for the category-drift firewall demo
     // (T5). A mandate scoped to "gifts" must never settle a cart with this.
     item_id: 'itm_ram',
@@ -172,34 +191,38 @@ const ITEMS: {
   },
 ];
 
-/** Idempotent: seeds only when the catalog is empty. */
+/**
+ * Idempotent and ADDITIVE: inserts any seed item/variant that is missing and
+ * never touches existing rows (the merchant volume persists across image
+ * rebuilds, and the dashboard may edit policy/prices later). Returns true
+ * when anything was added.
+ */
 export function seedIfEmpty(db: MerchantDb): boolean {
-  const count = (db.prepare('SELECT COUNT(*) AS n FROM catalog_items').get() as { n: number }).n;
-  if (count > 0) return false;
   const insertItem = db.prepare(
-    'INSERT INTO catalog_items (item_id, title, description, category) VALUES (?, ?, ?, ?)',
+    'INSERT OR IGNORE INTO catalog_items (item_id, title, description, category) VALUES (?, ?, ?, ?)',
   );
   const insertVariant = db.prepare(
-    'INSERT INTO variants (variant_id, item_id, attributes, list_price, floor_price, stock) VALUES (?, ?, ?, ?, ?, ?)',
+    'INSERT OR IGNORE INTO variants (variant_id, item_id, attributes, list_price, floor_price, stock) VALUES (?, ?, ?, ?, ?, ?)',
   );
   const insertPolicy = db.prepare(
     'INSERT OR IGNORE INTO merchant_policy (id, config) VALUES (1, ?)',
   );
+  let added = 0;
   db.transaction(() => {
     for (const item of ITEMS) {
-      insertItem.run(item.item_id, item.title, item.description, item.category);
+      added += insertItem.run(item.item_id, item.title, item.description, item.category).changes;
       for (const v of item.variants) {
-        insertVariant.run(
+        added += insertVariant.run(
           v.variant_id,
           item.item_id,
           JSON.stringify(v.attributes),
           v.list_price,
           v.floor_price,
           v.stock,
-        );
+        ).changes;
       }
     }
-    insertPolicy.run(JSON.stringify(DEFAULT_POLICY));
+    added += insertPolicy.run(JSON.stringify(DEFAULT_POLICY)).changes;
   })();
-  return true;
+  return added > 0;
 }

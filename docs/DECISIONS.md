@@ -16,6 +16,80 @@ Entry format:
 
 ---
 
+### D020 — 2026-08-26 — The verdict applier is the only decider; the layer-2 slot is explicit and its absence means escalate; dispatch happens inside the verdict — [human + Claude Fable 5]
+- **Decision:** `applyVerdict(layer1, layer2)` in `services/firewall/src/verdict.ts`
+  is the single place a verdict is decided (CONSTRAINTS #6). Layer 1
+  blocks alone. The layer-2 argument is the literal `'not_configured'`
+  on Day 8 and becomes a union with an explicit recommendation object on
+  Day 9; the written pre-commitment is that once layer 2 is configured a
+  missing, failed, malformed or timed-out recommendation maps to
+  `escalate`, never `allow`. On `allow` the firewall dispatches the
+  `settlement_request` (embedding the very verdict envelope the buyer
+  receives, plus the attested `buyer_public_key`) and delivers the
+  verdict to the seller BEFORE replying to the buyer; a failed or
+  timed-out dispatch leaves the signed allow standing and records
+  `settlement_dispatched = 0` + the error on the cart row, so the
+  invariant is "allow with dispatch success ⇒ a receipt row exists" and
+  the buyer's outcome becomes `pending` with bounded polling. The
+  firewall bounds its own outbound waits (8 s dispatch, 5 s notify) so
+  the buyer's 30 s client timeout holds.
+- **Because:** D015's fallback-to-curve is right for agents (a model
+  that cannot think still negotiates inside deterministic bounds) and
+  wrong for a verifier (a verifier that cannot think must not wave money
+  through); writing the rule into the type today means Day 9 cannot
+  inherit the wrong default by accident. Dispatching inside the verdict
+  gives the demo a clean "buyer hears allow → receipt exists" story;
+  keeping the verdict truthful when settlement is down keeps compliance
+  and payment as separate facts, both visible.
+- **Instead of:** Deciding the verdict where the LLM answer lands (Day 9
+  would then own the money decision); replying the verdict first and
+  dispatching after (the buyer would poll a 404 for a while and the
+  invariant would be fuzzy); turning a dispatch failure into a `block`
+  (a lie — the purchase was compliant).
+- **Tradeoff accepted:** A failed dispatch is not retried in v0.1 — the
+  row says so, Day 10 may resume it; the verdict reply carries the
+  dispatch latency.
+- **Revisit if:** an async binding (Appendix A) arrives — dispatch then
+  moves out of the reply path.
+
+### D019 — 2026-08-26 — Cart line items carry the seller's snapshot; one mandate, one purchase (pending escalate counts); seq streams are per receiver — [human + Claude Fable 5]
+- **Decision:** (1) `cart_mandate.line_items[]` gain `catalog_item`, the
+  seller's exact snapshot from `catalog_offer`; every receiver recomputes
+  `catalog_hash` over it and the firewall reads the seller-declared
+  `category` from it (PROTOCOL §7.8). (2) An Intent Mandate is consumed
+  by its first `allow` (`MANDATE_ALREADY_USED`); a cart held in
+  `escalate` also counts as in use (`MANDATE_IN_REVIEW`); a `block` does
+  not consume it. Velocity limits are keyed by `principal_id`. The demo
+  seed therefore signs a fresh mandate per run. (3) Sequence streams are
+  per (session, sender, receiver); `message_id` uniqueness stays
+  session-wide across streams (§6).
+- **Because:** (1) The firewall never sees the catalog, so
+  `CATEGORY_BLOCKED` — the layer-1 catch of the flagship scenario — was
+  unimplementable without the item on the wire; the snapshot form lets
+  the hash be recomputed by anyone and lets the seller's copy prove a
+  relabelled-and-re-hashed item post hoc. (2) Without single use, a
+  corrupted agent could run a hundred sessions each "within budget" on
+  one ₹5,000 authorization; without the escalate rule a second cart
+  could race a human decision. Per-principal velocity survives the
+  per-run mandate. (3) Day 7 already assumed settlement sees the
+  firewall from seq 1; the buyer now talks to two receivers in one
+  session and each receiver can only count what it sees.
+- **Instead of:** Copying only `category`/`title` into the line item
+  (uncheckable against the hash); having the firewall fetch the catalog
+  from the merchant (a second trust path and a session it does not
+  have); carrying the seller-signed `catalog_offer` envelope (correct,
+  larger, and the firewall still could not tell a fabricated seller from
+  a real one without a seller PKI — a v0.2 candidate named in THREAT_MODEL
+  T1); a single global seq per sender (every receiver would see gaps).
+- **Tradeoff accepted:** The firewall cannot prove the seller produced
+  the snapshot — detection of a re-hashing buyer is post hoc via the
+  seller copy. A legit agent that re-registers a used mandate under a
+  new session key is refused with `MANDATE_CONFLICT` at registration,
+  before the cart stage.
+- **Revisit if:** a seller signs its snapshots (then the firewall verifies
+  provenance directly) or multi-purchase mandates are needed (then a
+  spend counter replaces single use).
+
 ### D018 — 2026-08-25 — Settlement keeps its own append-only hash chain; the receipt's `ledger_entry_hash` is real from day one — [human + Claude Fable 5]
 - **Decision:** `settlement_events` is an append-only, per-mandate hash
   chain (`sha256(prev ‖ JCS(entry))`, genesis = 64 zero nibbles) with a

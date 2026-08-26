@@ -209,11 +209,12 @@ describe('E2E: F2 and F3', () => {
     await stack.close();
   });
 
-  it('FLAGSHIP (layer 1): a corrupted buyer puts server RAM under a gifts mandate → BLOCKED, no order (T5, F3)', async () => {
-    // Budget raised so the negotiation itself succeeds — the firewall, not
-    // the strategy, must be what stops the money.
-    const stack = await makeStack({ budget: 2_000_000 });
-    const { result } = await stack.run({ target_variant_id: 'var_ram_64' });
+  it('FLAGSHIP (layer 1): a corrupted buyer puts an industrial relay under a gifts mandate → BLOCKED, no order (T5, F3)', async () => {
+    // The relay lists at ₹4,200 — inside the ₹5,000 budget — so the
+    // negotiation itself succeeds and the FIREWALL, not the strategy, is
+    // what stops the money. (The ₹18,500 RAM kit ends in a walk-away.)
+    const stack = await makeStack();
+    const { result } = await stack.run({ target_variant_id: 'var_relay_8ch' });
     expect(result.outcome).toBe('blocked');
     expect(result.state).toBe('BLOCKED');
     expect(result.reason).toBe('CATEGORY_BLOCKED');

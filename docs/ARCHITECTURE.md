@@ -61,16 +61,25 @@ Sits between the Buyer Agent and Settlement — it is the ONLY caller
 Settlement accepts (D011). Holds the principal-signed Intent Mandate from
 `mandate_register` and audits carts only against that stored copy. Two
 layers, strict order:
-1. **Deterministic policy engine** (runs first, can hard-block alone):
-   amount cap, velocity limit (transactions per time window), merchant
-   allowlist, category rules, time-window rules. Pure code; no LLM involved.
-2. **LLM intent-verifier** (runs only if layer 1 passes): audits whether the
-   settlement_request semantically matches the ORIGINAL signed Intent
+1. **Deterministic policy engine** (`policy.ts`, runs first, can
+   hard-block alone): amount cap, quantity cap, category (read from the
+   seller's snapshot carried in the cart, D019), catalog-hash
+   recomputation, merchant allowlist, velocity limit per principal per
+   window, expiry/deadline by the firewall's clock, one-mandate-one-
+   purchase (a pending escalate counts as in use). Every violated rule is
+   listed. Pure code; the test suite greps the firewall source to prove
+   no LLM import exists outside the (Day 9) verifier module.
+2. **LLM intent-verifier** (runs only if layer 1 passes; Day 9): audits
+   whether the cart semantically matches the ORIGINAL signed Intent
    Mandate — catches drift (e.g., mandate implies 1 item, cart holds 3;
    goal says "gift", cart is server hardware).
 - Verdicts: `allow` / `block` / `escalate` — escalate lands in a human
   approval queue in the dashboard; settlement is held until a human decides.
-- The LLM only RECOMMENDS; a deterministic layer applies the verdict.
+- The LLM only RECOMMENDS; `applyVerdict` (D020) is the single deterministic
+  decider, and a missing recommendation maps to `escalate`, never `allow`.
+- On allow the firewall dispatches `settlement_request` and delivers the
+  verdict to the seller before replying to the buyer; dispatch outcome is
+  recorded on the cart row (`settlement_dispatched`, `seller_notified`).
 - Every verdict, with inputs and reasoning summary, is written to the audit
   log.
 - Flagship demo scenario: a buyer agent seeded with a corrupted goal is

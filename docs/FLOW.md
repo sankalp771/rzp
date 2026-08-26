@@ -15,11 +15,16 @@ returns the full signed transcript when the session reaches a terminal
 state.
 
 1. Operator (or demo seed) — the **principal** — authors and signs an
-   **Intent Mandate** with the principal key (PROTOCOL §8). Buyer Agent is
-   instantiated with it read-only, generates a session keypair, and sends
-   `mandate_register` → **Firewall**: principal signature verified → mandate
-   stored by `intent_mandate_ref` → buyer key pinned → `mandate_ack`;
-   ledger entries on both sides.
+   **Intent Mandate** with the principal key (PROTOCOL §8; the demo seed
+   signs a fresh one per run because a mandate is single-use, D019). Buyer
+   Agent holds it read-only, generates a session keypair, and sends
+   `mandate_register` → **Firewall**: principal key must be trusted and
+   the signature verify → mandate stored by `intent_mandate_ref` → buyer
+   key pinned to the ref → signed `mandate_ack`. **No ack, no session:**
+   the buyer refuses to send `session_init` unregistered
+   (`FIREWALL_UNREACHABLE`, D010) and flips `mandate_registered = 1` only
+   on a verified ack. Ledger entries on both sides (Day 10; pino + rows
+   until then).
 2. Buyer Agent → Merchant Server: `session_init` (self-signed, carries key +
    `intent_mandate_ref` hash only) → seller pins key, replies `session_ack`
    with capabilities manifest + chosen version → Buyer verifies compatibility
@@ -44,30 +49,57 @@ state.
    strategy decides accept or walk-away.
 6. On accept: Buyer sends `accept` (echoing the accepted line items; seller
    verifies the echo) → builds **Cart Mandate** binding `intent_mandate_ref`,
-   the accepted message id, per-item `catalog_hash`es and final total → signs
-   → sends `cart_mandate` to the **Firewall**, copy to the seller.
+   the accept that closed the deal, per-item `catalog_hash` **and the
+   seller's exact `catalog_item` snapshot** (D019), and the final total →
+   `mandate_hash` over all of it → signs → sends the **seller's copy
+   first** (own envelope on the seller stream; the merchant checks it
+   against the accept it issued, the agreed terms and the snapshots it
+   served in this session → `COMPLIANCE_REVIEW`, or `ACCEPT_MISMATCH`),
+   then `cart_mandate` to the **Firewall** (its own stream, seq 1).
+   Seller-copy-first because the firewall delivers the verdict to the
+   seller inside its own handler (step 7) and the seller must already
+   hold the cart.
 7. **Firewall** audits the cart against the mandate it stored in step 1 —
-   never against anything the buyer sends now.
-   - Layer 1 deterministic checks → hard block possible (→ F3).
-   - Layer 2 LLM intent-verifier → recommends allow / block / escalate →
-     deterministic applier enforces verdict; ledger entry with reasoning
-     summary → signed `firewall_verdict` sent to buyer and seller.
-8. On allow: **Firewall → Settlement**: `settlement_request` (cart mandate +
-   verdict, both signed, + the firewall-attested `buyer_public_key`).
-   Settlement re-verifies firewall envelope, verdict signature, mandate
-   hash (recomputed), buyer signature → replies HTTP 204 → looks the order
-   up by receipt (crash recovery) or creates the Razorpay order (test mode,
-   `mandate_hash` as idempotency key, bounded retry F4) → payment
-   confirmation: v0.1 has no public endpoint for real inbound webhooks, so
-   with `PAYMENT_SIMULATION` on, settlement posts a correctly HMAC-signed
-   `order.paid` to its own `/webhook/razorpay` (the production verifier);
-   `ORDER_STATUS_POLL` may also confirm from the Orders API → every step an
-   append-only `settlement_events` entry (D018) → signed
-   `settlement_receipt`. Transport (D013): the HTTP response to
-   `settlement_request` only acknowledges acceptance; buyer and seller poll
-   `GET /receipt/{mandate_hash}` (signed, idempotent) until it returns a
-   `settlement_receipt` with `paid` or `failed` → final ledger entries →
-   session `SETTLED`.
+   never against anything the buyer sends now; the cart must be signed by
+   the key pinned at registration (`MANDATE_UNKNOWN` / `SIG_INVALID`
+   otherwise), and hash and total are recomputed.
+   - Layer 1 deterministic checks (`policy.ts`): amount cap, quantity
+     cap, category from the snapshot, catalog-hash recomputation,
+     merchant allowlist, per-principal velocity, expiry/deadline by the
+     firewall's clock, one-mandate-one-purchase incl. a pending escalate
+     → every violated rule listed → hard block possible (→ F3).
+   - Layer 2 LLM intent-verifier (Day 9; slot `not_configured` today,
+     visible in `/health`) → recommends allow / block / escalate →
+     `applyVerdict` enforces (D020) → append-only `verdicts` row →
+     signed `firewall_verdict` is the HTTP reply to the buyer, and is
+     delivered to the seller in its own envelope (best-effort, recorded
+     as `seller_notified`).
+8. On allow, **inside the same handler, before the verdict is replied**:
+   **Firewall → Settlement**: `settlement_request` (the buyer's cart
+   envelope + the very verdict envelope the buyer gets + the attested
+   `buyer_public_key`). Settlement re-verifies firewall envelope, verdict
+   signature, mandate hash (recomputed), buyer signature → replies HTTP
+   204 → looks the order up by receipt (crash recovery) or creates the
+   Razorpay order (test mode, `mandate_hash` as idempotency key, bounded
+   retry F4) → payment confirmation: v0.1 has no public endpoint for real
+   inbound webhooks, so with `PAYMENT_SIMULATION` on, settlement posts a
+   correctly HMAC-signed `order.paid` to its own `/webhook/razorpay` (the
+   production verifier); `ORDER_STATUS_POLL` may also confirm from the
+   Orders API → every step an append-only `settlement_events` entry
+   (D018) → signed `settlement_receipt`. The firewall records
+   `settlement_dispatched` on the cart row; **a failed dispatch does not
+   change the verdict** (amendment #4, D020) — the buyer then ends
+   `pending`. Transport (D013): the HTTP response to `settlement_request`
+   only acknowledges acceptance; buyer and seller each poll
+   `GET /receipt/{mandate_hash}` (signed, idempotent; bounded by time and
+   poll count) until it returns a `settlement_receipt` with `paid` or
+   `failed` → session `SETTLED` / `FAILED`, or `pending` when the window
+   closes (state stays `SETTLING`).
+   **Latency (D020):** the firewall's dispatch and seller notification
+   run inside the buyer's HTTP call: `BUYER_HTTP_TIMEOUT_MS (30s) >
+   FIREWALL_DISPATCH_TIMEOUT_MS (8s) + FIREWALL_NOTIFY_TIMEOUT_MS (5s) +
+   processing`. Settlement answers 204 before touching Razorpay, so F4's
+   retry is outside this window.
 
 The buyer and seller never call Settlement; it accepts requests only from the
 firewall's configured key (D011).
@@ -82,10 +114,14 @@ not a failure of the system.
 
 ## F3 — Firewall block & escalate
 
-- **Block (layer 1):** deterministic rule fails (amount cap, velocity,
-  allowlist, category, time window) → settlement refused with machine-readable
-  reason code → ledger entry → signed `firewall_verdict` (`block`) sent to
-  buyer and seller → session `BLOCKED`.
+- **Block (layer 1):** any deterministic rule fails (amount cap, quantity
+  cap, category, catalog hash, allowlist, velocity, expiry/deadline,
+  mandate already used / in review) → nothing is sent to settlement →
+  `verdicts` row + log with every reason and a human-readable detail →
+  signed `firewall_verdict` (`block`, all reasons) replied to the buyer
+  and delivered to the seller → both sessions `BLOCKED`. Demo:
+  `node scripts/negotiate.mjs --target var_ram_64` (server RAM under a
+  gifts mandate → `CATEGORY_BLOCKED`).
 - **Block (layer 2 applied):** intent-verifier finds semantic mismatch with
   the Intent Mandate → same closure path, reason includes verifier summary.
 - **Escalate:** verdict `escalate` → session held in `COMPLIANCE_REVIEW` →
@@ -114,9 +150,14 @@ path: cut candidate #3, not implemented in v0.1.
 
 Any received message that fails signature, schema, version, or replay checks:
 rejected at the boundary → never reaches agent logic → rejection ledger entry
-with reason → sender receives an `error` message with a code from PROTOCOL.md
-§10 (fatal codes terminate the session → `FAILED`). Repeated rejections from
-a peer trip a per-session circuit breaker.
+with reason → sender receives an advisory `error` message with a code from
+PROTOCOL.md §10, signed with the receiver's service key at seq 1, outside
+every stream. **The receiver's session is untouched** — no state change, no
+seq consumed (BUG-004: anything else lets a stranger who knows a
+`session_id` kill a live session). Fatal codes terminate a session only
+when the message was authenticated (handler-level rejection) or on the
+*sender's* side when it receives one. Repeated rejections from a peer trip
+a per-session circuit breaker (planned).
 
 ## F6 — Ledger write path (cross-cutting)
 
