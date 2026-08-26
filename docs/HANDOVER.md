@@ -8,31 +8,38 @@ handoff entries scroll down.
 
 ## Current state (edit in place)
 
-**Phase:** Week 1, Day 6 done (a day early). Real models negotiate:
-"Gemini buying from Groq" runs live over Compose with rationales.
+**Phase:** Week 1, Day 7 done (a day early). Money moves: a firewall-signed
+request became a real Razorpay test-mode order (`order_TULvJMWlrc12qi`)
+with a signed receipt, live over Compose.
 **Done:** Docs system; stack decided (D006–D009); repo scaffold
 (FEATURE-001); ACNP spec + protocol library (FEATURE-002/003); merchant
-server (FEATURE-004); buyer agent (FEATURE-005, D014); LLM adapter layer —
-Gemini/Groq/Mistral via raw fetch, advisory proposals with deterministic
-fallback, no-silent-stub boot rule, per-round attribution, chaos E2E,
-demo transcript script (FEATURE-006, D015/D016).
+server (FEATURE-004); buyer agent (FEATURE-005, D014); LLM adapter layer
+(FEATURE-006, D015/D016); settlement service — firewall-only `/acnp` with
+the §7.10 chain, idempotency + crash-recovery lookup, bounded retry,
+webhook HMAC, append-only event chain, signed receipts, payment
+simulation (FEATURE-007, D017/D018; spec fix: `buyer_public_key` in
+`settlement_request`).
 **In progress:** —
 **Broken / unverified:** Clamp/replay/fallback events are pino-logged +
-`llm_moves`, not ledger-logged (ledger Day 10). Merchant does not yet
-handle cart_mandate copies or bundle_proposal. `mandate_register` is built
-but undeliverable until the firewall exists — every buyer session row
-carries `mandate_registered=0` and the runner warns on each run (Day 8
-must flip this). Mistral adapter passes the live contract suite but has
-not been used in a full negotiation (amendment: bonus, not blocker).
-**Do not touch / avoid:** `.env` holds real free-tier keys (gitignored).
-**The three keys were pasted in chat (twice) and are NOT yet rotated** —
-rotate in the Gemini/Groq/Mistral consoles and put the new values straight
-into `.env`, never into chat; only then change this line. `.env` also holds
-a locally-generated demo principal keypair + CONTROL_TOKEN.
-`tsconfig.tsbuildinfo` must stay out of the Docker context (see FEATURE-001).
-Provider model ids retire without notice (Groq's llama-3.3-70b did on
-Day 6) — run `LLM_CONTRACT=1 npx vitest run packages/llm/src/contract.test.ts`
-before any demo.
+`llm_moves`; `settlement_events` is its own chain until the Day 10 ledger
+absorbs it. Merchant does not yet handle cart_mandate copies or
+bundle_proposal. `mandate_register` and `cart_mandate` are undeliverable
+until the firewall exists — buyer sessions carry `mandate_registered=0`
+(Day 8 must flip this and send `settlement_request` with the attested
+`buyer_public_key`). In-flight settlements are not resumed after a crash.
+Razorpay's own order status stays `created` (the tap is simulated).
+Mistral: contract suite only.
+**Do not touch / avoid:** `.env` holds real keys (gitignored): Razorpay
+test keys + webhook secret (in), demo principal keypair, CONTROL_TOKEN,
+long-lived FIREWALL/SETTLEMENT keys (generated Day 7). **The three LLM
+keys were pasted in chat (twice) and are NOT yet rotated** — rotate in the
+consoles, put the new values straight into `.env`, never into chat; only
+then change this line and re-run the contract suite. Compose interpolates
+`$` inside `.env` — write `$$` for a literal dollar (bit the webhook
+secret on Day 7). `tsconfig.tsbuildinfo` must stay out of the Docker
+context. Provider model ids retire without notice — run
+`LLM_CONTRACT=1 npx vitest run packages/llm/src/contract.test.ts` before
+any demo.
 **Next up (ordered):**
 1. ~~Repo scaffold + Docker Compose skeleton + CI pipeline~~ ✅ FEATURE-001
 2. ~~PROTOCOL.md v0.1 review pass~~ ✅ FEATURE-002 (D010 mandate
@@ -45,8 +52,10 @@ before any demo.
    E2E negotiation green)
 6. ~~LLM adapter layer + wire LLMs into both agents~~ ✅ FEATURE-006
    (three providers live, advisory-with-fallback, chaos E2E)
-7. End-to-end happy path: negotiate → accept → cart mandate
-8. Settlement: Razorpay test-mode orders + webhooks + receipt
+7. End-to-end happy path: negotiate → accept → cart mandate (closes on
+   Day 8 with the firewall; tag `known-good` #1 then)
+8. ~~Settlement: Razorpay test-mode orders + webhooks + receipt~~ ✅
+   FEATURE-007 (live against Razorpay test mode)
 9. Firewall layer 1 (deterministic), then layer 2 (intent-verifier), then
    escalation queue
 10. Audit ledger (hash chain) + verification routine
@@ -71,6 +80,29 @@ Format — exactly five lines plus header:
 - Decisions: <"none" or pointer to DECISIONS.md entries added>
 
 <!-- entries begin below -->
+
+### 2026-08-26 15:30 — [Claude Fable 5 (claude-fable-5)]
+- Did: FEATURE-007 settlement — spec fix §7.10 (buyer_public_key attested
+  by the firewall, shipped alone); storage + append-only hash chain;
+  Razorpay client live-test/simulated with the CONSTRAINTS #2 boot rule;
+  firewall-only /acnp with the full §7.10 chain; lookup-by-receipt before
+  create; bounded retry; webhook HMAC over the raw body; signed receipts +
+  pending; payment simulation + Orders-API poll flags. Live Gate 4: real
+  order order_TULvJMWlrc12qi, receipt sig ✔, idempotent repeat.
+- Left: nothing on FEATURE-007. Day 8: firewall layer 1 + verdict
+  applier; buyer builds/sends cart_mandate + mandate_register; firewall
+  sends settlement_request (with buyer_public_key); agents poll /receipt;
+  tag known-good #1. LLM keys: user still to rotate.
+- Watch out: Compose interpolates `$` in .env (`$$` for literal); the
+  settlement replay guard starts each session at seq 1 for the firewall
+  (the verdict message is not addressed to settlement); Razorpay's order
+  status stays `created` under simulation — say so on video; Day 11 evals
+  must compare LLM-advised vs pure-curve economics per model before any
+  buyer strategy guard is considered.
+- Tests: Gate 0 green (221/221 + 6 skipped live-LLM); Gate 4 all five
+  items over HTTP + live against Razorpay test mode; Gate 5-style chain
+  tamper test + no-update/delete grep; Compose all healthy in live-test.
+- Decisions: D017, D018.
 
 ### 2026-08-25 04:30 — [Claude Fable 5 (claude-fable-5)]
 - Did: FEATURE-006 — @negotiator/llm (Gemini + OpenAI-compat adapters via

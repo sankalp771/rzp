@@ -16,6 +16,51 @@ Entry format:
 
 ---
 
+### D018 — 2026-08-25 — Settlement keeps its own append-only hash chain; the receipt's `ledger_entry_hash` is real from day one — [human + Claude Fable 5]
+- **Decision:** `settlement_events` is an append-only, per-mandate hash
+  chain (`sha256(prev ‖ JCS(entry))`, genesis = 64 zero nibbles) with a
+  `verifyChain` routine. The `settlement_receipt.ledger_entry_hash` is the
+  entry hash of the confirming event (`PAYMENT_CONFIRMED` / failure). No
+  update or delete path exists for the table; a test greps the source
+  tree for one. Day 10's global ledger absorbs this table rather than
+  replacing it.
+- **Because:** The receipt schema requires the field and a placeholder
+  would be a lie on the wire; the money path is exactly where an audit
+  chain matters most; building the chain here lets Gate 5's tamper test
+  run three days early on the highest-value data.
+- **Instead of:** Emitting a dummy hash until Day 10 (fabricated
+  evidence); standing up the ledger service today (out of scope, and
+  settlement must not depend on another service to confirm money).
+- **Tradeoff accepted:** Two chains until Day 10 folds them; the Day 10
+  ledger must import rather than re-derive these entries.
+- **Revisit if:** the global ledger's entry format cannot embed these
+  entries verbatim.
+
+### D017 — 2026-08-25 — Razorpay idempotency = local mandate key + receipt correlation; the card tap is simulated by a self-signed webhook — [human + Claude Fable 5]
+- **Decision:** One `settlements` row per `mandate_hash` (local idempotency,
+  CONSTRAINTS #10); Razorpay's 40-char `receipt` field carries the first
+  40 hex chars of the hash and `notes` the full hash; before every create
+  attempt settlement looks the order up by receipt and reuses it. Payment
+  confirmation: the buyer is an agent with no card, so after the real
+  test-mode order exists, settlement posts a correctly HMAC-signed
+  `order.paid` event to its own verifier (`PAYMENT_SIMULATION`, code
+  default OFF, loud at boot and in `/health`). Real inbound webhooks
+  need a public HTTPS endpoint; v0.1 has none (no tunnels).
+  `ORDER_STATUS_POLL` optionally cross-checks the Orders API.
+- **Because:** Razorpay's Orders API has no idempotency header, so the
+  correlation must be ours; the receipt lookup closes the crash window
+  between "created" and "persisted". A real order id in the receipt and
+  in the Razorpay dashboard is the "settles through Razorpay" claim; the
+  simulated tap exercises the exact verifier a real webhook would hit.
+- **Instead of:** Payment Links / hosted checkout (needs a human and a
+  browser mid-demo); a tunnel for real webhooks (fragile, out of scope);
+  skipping Razorpay for a pure simulator (would gut the claim).
+- **Tradeoff accepted:** `payment.captured` never truly happens in test
+  mode for the demo; the receipt says so through the simulation flag and
+  the `source` field on the confirming event.
+- **Revisit if:** a public endpoint or an agent-payable rail (UPI
+  autopay / tokens) becomes available.
+
 ### D016 — 2026-08-25 — Provider adapters are raw `fetch`; Groq and Mistral share one OpenAI-compatible adapter — [human + Claude Fable 5]
 - **Decision:** No vendor SDKs. `GeminiAdapter` speaks the generativelanguage
   REST API; `OpenAiCompatAdapter` speaks the chat-completions shape for Groq

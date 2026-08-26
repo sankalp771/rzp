@@ -53,12 +53,18 @@ state.
      deterministic applier enforces verdict; ledger entry with reasoning
      summary → signed `firewall_verdict` sent to buyer and seller.
 8. On allow: **Firewall → Settlement**: `settlement_request` (cart mandate +
-   verdict, both signed). Settlement re-verifies firewall envelope, verdict
-   signature, mandate hash, buyer signature → creates Razorpay order (test
-   mode, `mandate_hash` as idempotency key) → payment simulated/authorized in
-   test mode → Razorpay webhook → webhook signature verified → settlement
-   confirmed. Transport (D013): the HTTP response to `settlement_request`
-   only acknowledges acceptance; buyer and seller poll
+   verdict, both signed, + the firewall-attested `buyer_public_key`).
+   Settlement re-verifies firewall envelope, verdict signature, mandate
+   hash (recomputed), buyer signature → replies HTTP 204 → looks the order
+   up by receipt (crash recovery) or creates the Razorpay order (test mode,
+   `mandate_hash` as idempotency key, bounded retry F4) → payment
+   confirmation: v0.1 has no public endpoint for real inbound webhooks, so
+   with `PAYMENT_SIMULATION` on, settlement posts a correctly HMAC-signed
+   `order.paid` to its own `/webhook/razorpay` (the production verifier);
+   `ORDER_STATUS_POLL` may also confirm from the Orders API → every step an
+   append-only `settlement_events` entry (D018) → signed
+   `settlement_receipt`. Transport (D013): the HTTP response to
+   `settlement_request` only acknowledges acceptance; buyer and seller poll
    `GET /receipt/{mandate_hash}` (signed, idempotent) until it returns a
    `settlement_receipt` with `paid` or `failed` → final ledger entries →
    session `SETTLED`.
@@ -95,11 +101,14 @@ not a failure of the system.
 
 ## F4 — Settlement failure & retry
 
-Order creation or payment fails → retry with exponential backoff up to a
-ceiling (same idempotency key — no duplicate orders; each try is a
-`SETTLEMENT_ATTEMPT` ledger event) → on exhaustion, session enters `FAILED`
-→ refund path invoked if any partial capture exists → both agents receive a
-`settlement_receipt` with `status: failed`.
+Order creation fails → retry with exponential backoff up to a ceiling
+(`SETTLEMENT_MAX_ATTEMPTS`, default 5; same idempotency key and a
+lookup-by-receipt before each attempt — no duplicate orders; each try is a
+`SETTLEMENT_ATTEMPT` event; non-retryable 4xx fails fast) → on exhaustion
+`SETTLEMENT_RETRY_EXHAUSTED`, session enters `FAILED` → both agents receive
+a `settlement_receipt` with `status: failed` via `GET /receipt`. A
+`payment.failed` webhook closes the same way (`PAYMENT_FAILED`). Refund
+path: cut candidate #3, not implemented in v0.1.
 
 ## F5 — Boundary rejection (any step)
 

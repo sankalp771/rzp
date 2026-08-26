@@ -97,6 +97,13 @@
   triggers a spending workflow) is gated by a shared-secret header
   (`CONTROL_TOKEN`, D014) and refuses to serve without it — demo-grade by
   design; production would sit behind real operator authentication.
+- A real payer: the buyer is an agent — there is no card tap and no
+  checkout UI. Settlement creates a real Razorpay test-mode order, then
+  (with `PAYMENT_SIMULATION` on, loud at boot and in `/health`) posts a
+  correctly HMAC-signed `order.paid` webhook to its own verifier. Real
+  inbound webhooks from Razorpay require a public HTTPS endpoint, which
+  v0.1 does not have; no tunnels. The verifier, the order, and the receipt
+  chain are real; only the customer's tap is simulated (D017).
 - Principal key isolation: in the demo, `PRINCIPAL_PRIVATE_KEY` lives in the
   same env as the agents so one-command spinup can seed a signed Intent
   Mandate. In the real design the principal signs elsewhere and agents
