@@ -42,9 +42,13 @@ services:
     build: { context: ., args: { SERVICE: firewall } }
     ports: ['4003:4003']
     environment: { PORT: 4003 }
+    volumes:
+      # Registered mandates, carts and the append-only verdicts (named volume, see merchant).
+      - firewall-data:/app/data
     healthcheck: *healthcheck
     depends_on:
       settlement: { condition: service_healthy }
+      merchant: { condition: service_healthy }
 
   settlement:
     <<: *service
@@ -59,4 +63,5 @@ services:
 volumes:
   merchant-data:
   buyer-data:
+  firewall-data:
   settlement-data:
