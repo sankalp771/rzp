@@ -274,6 +274,11 @@ function render(run, fw) {
     lines.push(
       `SETTLED: Razorpay order ${run.receipt.razorpay_order_id} (${run.receipt.status}) · verdict ${v.verdict}/${v.layer} — ${who}`,
     );
+  } else if (run.outcome === 'settled') {
+    // A resumed run has no catalog in its transcript, so no list price to compare.
+    lines.push(
+      `SETTLED (resumed): Razorpay order ${run.receipt.razorpay_order_id} (${run.receipt.status}) for ${rupees(settled)} · verdict ${v.verdict}/${v.layer} — ${who}`,
+    );
   } else if (run.outcome === 'blocked') {
     lines.push(
       `BLOCKED (layer ${v.layer}): ${v.reasons.join(', ')} — ${who}; agreed ${rupees(settled)} never reached settlement`,
