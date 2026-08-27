@@ -49,6 +49,13 @@ export function loadPolicy(db: MerchantDb): MerchantPolicy {
   return MerchantPolicy.parse(JSON.parse(row.config));
 }
 
+/** Dashboard `PUT /policy`: validated by the same schema that guards boot. */
+export function savePolicy(db: MerchantDb, policy: MerchantPolicy): MerchantPolicy {
+  const parsed = MerchantPolicy.parse(policy);
+  db.prepare('UPDATE merchant_policy SET config = ? WHERE id = 1').run(JSON.stringify(parsed));
+  return parsed;
+}
+
 export interface VariantPricing {
   list_price: number;
   floor_price: number;

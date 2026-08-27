@@ -3,7 +3,9 @@ import { createAdapterFromEnv, type LlmAdapter } from '@negotiator/llm';
 import { PROTOCOL_NAME, PROTOCOL_VERSION, makeBoundary } from '@negotiator/protocol';
 import { openDb, SqliteReplayStore, type MerchantDb } from './db.js';
 import { MerchantHandlers, type ChainConfig, type GetFn } from './handlers.js';
+import { MerchantPolicy, savePolicy } from './policy.js';
 import { seedIfEmpty } from './seed.js';
+import { ledgerRoutes } from './ledger-routes.js';
 
 export const SERVICE_NAME = 'merchant';
 
@@ -21,6 +23,8 @@ export interface AppOptions {
   llm?: LlmAdapter;
   /** Firewall/settlement keys + receipt poll seam; defaults to env + fetch. */
   chain?: ChainConfig;
+  /** Operator read/write API secret (ledger, policy, sessions); defaults to DASHBOARD_TOKEN. */
+  dashboardToken?: string;
 }
 
 /**
@@ -60,6 +64,7 @@ export function buildApp(opts: AppOptions = {}) {
     ...(opts.now ? { now: opts.now } : {}),
   });
 
+  const dashboardToken = opts.dashboardToken ?? process.env['DASHBOARD_TOKEN'];
   app.get('/health', async () => ({
     status: 'ok',
     service: SERVICE_NAME,
@@ -68,7 +73,45 @@ export function buildApp(opts: AppOptions = {}) {
     // Effective model, so a demo can never quietly run on the stub (D015).
     llm: handlers.llmInfo,
     ...handlers.chainInfo,
+    ledger_entries: handlers.ledger.count(),
+    operator_api: dashboardToken ? 'enabled' : 'disabled (DASHBOARD_TOKEN unset)',
   }));
+
+  // Operator API (D024): the ledger, this merchant's sessions, and the policy.
+  const gate = ledgerRoutes(app, handlers.ledger, dashboardToken);
+  app.get('/sessions', async (req, reply) => {
+    const denied = gate(req);
+    if (denied) return reply.code(denied.status).send({ error: denied.error });
+    return reply.code(200).send({
+      sessions: db
+        .prepare(
+          `SELECT session_id, state, buyer_agent_id, round, cart_mandate_hash, verdict, verdict_layer,
+                  settlement_status, razorpay_order_id, seller_model
+             FROM sessions ORDER BY rowid DESC LIMIT 200`,
+        )
+        .all(),
+    });
+  });
+  app.get('/policy', async (req, reply) => {
+    const denied = gate(req);
+    if (denied) return reply.code(denied.status).send({ error: denied.error });
+    return reply.code(200).send(handlers.currentPolicy);
+  });
+  app.put('/policy', async (req, reply) => {
+    const denied = gate(req);
+    if (denied) return reply.code(denied.status).send({ error: denied.error });
+    const parsed = MerchantPolicy.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid policy', issues: parsed.error.issues });
+    }
+    // Floors stay per variant in the catalog; the policy is the discount
+    // ceiling, rounds and capabilities. Bounds enforcement reads the new
+    // policy from the next message on (still deterministic, CONSTRAINTS #5).
+    savePolicy(db, parsed.data);
+    const applied = handlers.reloadPolicy();
+    app.log.info({ policy: applied }, 'merchant policy updated by operator');
+    return reply.code(200).send(applied);
+  });
 
   app.post('/acnp', async (req, reply) => {
     const result = receive(req.body);

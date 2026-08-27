@@ -8,10 +8,12 @@ import {
   verifyObject,
   type BodyOf,
   type ErrorCode,
+  type JsonValue,
   type Message,
   type MessageType,
 } from '@negotiator/protocol';
 import { StubLlmAdapter, proposeMove, type LlmAdapter, type MoveRecord } from '@negotiator/llm';
+import { Ledger } from '@negotiator/ledger';
 import type { MerchantDb } from './db.js';
 import { effectiveFloor, loadPolicy, type MerchantPolicy } from './policy.js';
 import { decideSeller, type BuyerOfferView } from './strategy.js';
@@ -81,10 +83,15 @@ export interface ChainConfig {
 }
 
 export class MerchantHandlers {
-  private readonly policy: MerchantPolicy;
+  private policy: MerchantPolicy;
   /** Boot-time fallback key: signs error replies for unknown sessions. */
   private readonly serviceKey = generateKeyPair();
   private readonly inflight = new Set<Promise<void>>();
+  /**
+   * This merchant's own append-only audit chain (PROTOCOL §11, D023): every
+   * message in and out, every rejection, every clamp, move and state change.
+   */
+  readonly ledger: Ledger;
 
   constructor(
     private readonly db: MerchantDb,
@@ -99,6 +106,17 @@ export class MerchantHandlers {
     private readonly chain: ChainConfig = {},
   ) {
     this.policy = loadPolicy(db);
+    this.ledger = new Ledger(db, this.now);
+  }
+
+  /** Dashboard `PUT /policy` saved a new config: use it from the next message on. */
+  reloadPolicy(): MerchantPolicy {
+    this.policy = loadPolicy(this.db);
+    return this.policy;
+  }
+
+  get currentPolicy(): MerchantPolicy {
+    return this.policy;
   }
 
   /** For /health: what is actually proposing prices on this side. */
@@ -135,6 +153,9 @@ export class MerchantHandlers {
 
   /** Async since Day 6: the offer path awaits the (bounded) LLM proposal. */
   async handle(msg: Message): Promise<HandlerOutcome> {
+    // F6: the boundary accepted it (signature, schema, replay) — it is
+    // evidence now, whatever the handler decides next.
+    this.ledger.append('MESSAGE_IN', asPayload(msg), { session_id: msg.session_id });
     switch (msg.type) {
       case 'session_init':
         return this.onSessionInit(msg as Message<'session_init'>);
@@ -362,10 +383,15 @@ export class MerchantHandlers {
       this.agree(s.session_id, accept.message_id, body.line_items, body.total);
       return { reply: accept, commit: true };
     }
-    // Counter within bounds. Clamp events are pino-logged here (ledger from
-    // Day 10, BOUNDS_CLAMPED); the body is persisted for the accept-echo check.
+    // Counter within bounds. Every clamp is a ledger event (§7.5); the body
+    // is persisted for the accept-echo check.
     for (const reason of decision.clamp_reasons) {
       this.log.warn({ session_id: s.session_id, round, reason }, 'BOUNDS_CLAMPED');
+      this.ledger.append(
+        'BOUNDS_CLAMPED',
+        { round, reason, model_id: this.llm.modelId },
+        { session_id: s.session_id },
+      );
     }
     const counterBody: BodyOf<'counter_offer'> = {
       line_items: decision.line_items,
@@ -520,6 +546,11 @@ export class MerchantHandlers {
             this.setSettlement(sessionId, 'receipt_invalid', null);
             return;
           }
+          // Polled, not POSTed — but verified and acted on, so it is evidence too.
+          this.ledger.append('MESSAGE_IN', asPayload(receipt), {
+            session_id: sessionId,
+            ref: mandateHash,
+          });
           this.setSettlement(sessionId, receipt.body.status, receipt.body.razorpay_order_id);
           this.setState(sessionId, receipt.body.status === 'paid' ? 'SETTLED' : 'FAILED');
           this.log.info(
@@ -601,6 +632,18 @@ export class MerchantHandlers {
         r.fallback_reason ?? null,
         r.latency_ms,
       );
+    this.ledger.append(
+      'LLM_MOVE',
+      {
+        round,
+        role: 'seller',
+        model_id: r.model_id,
+        used_llm: r.used_llm,
+        fallback_reason: r.fallback_reason ?? null,
+        latency_ms: Math.round(r.latency_ms),
+      },
+      { session_id: sessionId },
+    );
     if (!r.used_llm && this.llm.provider !== 'stub') {
       this.log.warn({ session_id: sessionId, round, ...r }, 'LLM fallback to deterministic curve');
     }
@@ -613,6 +656,9 @@ export class MerchantHandlers {
 
   private setState(sessionId: string, state: string): void {
     this.db.prepare('UPDATE sessions SET state = ? WHERE session_id = ?').run(state, sessionId);
+    // §9: each party's own transitions are on record, so divergence between
+    // parties is provable from the two ledgers.
+    this.ledger.append('SESSION_STATE', { state }, { session_id: sessionId });
   }
 
   private nextSeq(sessionId: string): number {
@@ -645,7 +691,13 @@ export class MerchantHandlers {
       timestamp: this.now().toISOString(),
       body,
     };
-    return signObject(unsigned, s.seller_private_key, s.seller_public_key) as unknown as Message<T>;
+    const signed = signObject(
+      unsigned,
+      s.seller_private_key,
+      s.seller_public_key,
+    ) as unknown as Message<T>;
+    this.ledger.append('MESSAGE_OUT', asPayload(signed), { session_id: s.session_id });
+    return signed;
   }
 
   /**
@@ -689,9 +741,24 @@ export class MerchantHandlers {
       timestamp: this.now().toISOString(),
       body: { code, detail, offending_message_id: inbound.message_id },
     };
-    return {
-      reply: signObject(unsigned, key.privateKey, key.publicKey) as unknown as Message<'error'>,
-      commit: true,
-    };
+    const reply = signObject(
+      unsigned,
+      key.privateKey,
+      key.publicKey,
+    ) as unknown as Message<'error'>;
+    // F5/F6: a boundary rejection is on record WITHOUT trusting its
+    // session_id (nothing was verified); a handler rejection is on the
+    // session it really belongs to.
+    this.ledger.append(
+      authenticated ? 'HANDLER_REJECTED' : 'BOUNDARY_REJECTED',
+      { code, detail, claimed_session_id: inbound.session_id, reply: asPayload(reply) },
+      authenticated ? { session_id: inbound.session_id } : {},
+    );
+    return { reply, commit: true };
   }
+}
+
+/** A signed envelope as a ledger payload (JSON-safe by construction: JCS-signed). */
+function asPayload(m: Message): Record<string, JsonValue> {
+  return m as unknown as Record<string, JsonValue>;
 }
