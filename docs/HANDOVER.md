@@ -8,15 +8,19 @@ handoff entries scroll down.
 
 ## Current state (edit in place)
 
-**Phase:** Week 2, Day 9 done. **Both firewall layers and the human in
-the loop, live:** the vase run allowed at `layer intent_verifier`
-(Mistral) → real order `order_TUiS4AeOYaEB10`; the corporate hamper
-(every layer-1 number passes) blocked by layer 2 with
-`INTENT_DRIFT_CATEGORY`; under a real provider failure every cart
-escalated and the queue was driven from a second terminal: approve →
-`allow/human` seq 2 → real order `order_TUiVCzCWcfN4Fc`; reject →
-`HUMAN_REJECTED`; nobody → `ESCALATION_TIMEOUT` at 90 s inside the
-buyer's 120 s window. Tag `known-good-2`.
+**Phase:** Week 2, Day 10 done — **FEATURE FREEZE.** Every service keeps
+its own append-only hash-chained ledger (`packages/ledger`, D023) with
+`GET /ledger`, `/ledger/verify`, `/sessions` behind `DASHBOARD_TOKEN`
+(D024); settlement's money chain is absorbed verbatim; the dashboard
+(`:4005`, localhost only) runs demos, decides holds, edits policy and
+replays sessions over all four chains; `scripts/verify-ledgers.mjs` does
+the same from a terminal and verifies a copied DB offline; a pending run
+can be resumed. Live: benign run started through the proxy → real order
+`order_TUnHe99ozVTq8h`, four chains verified, 19/19 envelopes matched
+across parties; an out-of-band edit of entry 5 on a COPY → `CHAIN BROKEN
+at entry 5`; held cart approved through the proxy and resumed → real
+order `order_TUnPTn0mEsJkdl`. Tag `known-good-3`. Days 11–13 are evals,
+polish, video, submission — no new features.
 **Done:** Docs system; stack decided (D006–D009); repo scaffold
 (FEATURE-001); ACNP spec + protocol library (FEATURE-002/003); merchant
 server (FEATURE-004); buyer agent (FEATURE-005, D014); LLM adapter layer
@@ -25,15 +29,21 @@ layer 1 + chain closes (FEATURE-008, D019/D020, BUG-004); firewall layer
 2 (narrow-only intent-verifier, `intent.ts` the only LLM import) +
 token-gated human queue decided exactly once + timeout sweep + buyer
 hold → pending + merchant human-verdict handling + `review.mjs` +
-`itm_corp_hamper` (FEATURE-009, D021/D022; spec: human-layer codes).
-**In progress:** —
-**Broken / unverified:** Verdicts, `escalations`, `verifier_json`,
-`settlement_events`, `llm_moves`/clamps are still per-service tables +
-pino — the Day 10 ledger absorbs them. A held buyer run whose 120 s
-window closes ends `pending` with the hash printed and is NOT resumed
-(Day 10 carry-forward, together with failed-dispatch retry and
-in-flight settlement resume). `/review` is a bearer token, not operator
-identity (stated in `.env.example`; Day 10 dashboard). Mistral never
+`itm_corp_hamper` (FEATURE-009, D021/D022; spec: human-layer codes);
+per-service audit ledgers + operator API + dashboard + verify script +
+resume (FEATURE-010, D023/D024).
+**In progress:** — (feature freeze)
+**Broken / unverified:** The dashboard page itself has not been clicked
+by Claude — every call it makes (run, queue approve, sessions, four
+verifies) was driven through the proxy with curl; the user should open
+`:4005` once and read the Replay tab. A failed settlement dispatch is
+recorded (cart row + ledger `MESSAGE_OUT … delivery: failed`) but there is
+no re-dispatch (drop candidate #2, not built); in-flight settlements are
+not resumed after a settlement crash. The operator API is ONE token for
+every party and the console has no login (THREAT_MODEL non-goal, D024).
+A party can truncate its own ledger tail before anyone cited its head
+(T6 honest limit; cross-party head anchoring is v0.2). Ledger entries
+duplicate full envelopes (size, not correctness). Mistral never
 escalated on its own today (allow vase / block hamper) — the queue was
 exercised via a retired model id, i.e. a real provider failure, not a
 model "escalate"; the Day 11 evals must measure false-allow / false-block
@@ -93,8 +103,10 @@ test sleep must yield a macrotask so a concurrent "human" runs.
 9. ~~Firewall layer 1 (deterministic)~~ ✅ FEATURE-008 (D019/D020);
    ~~layer 2 (intent-verifier) + escalation queue~~ ✅ FEATURE-009
    (D021/D022; live approve/reject/timeout; tag `known-good-2`)
-10. Audit ledger (hash chain) + verification routine
-11. Dashboard: policy config, approval queue, session replay
+10. ~~Audit ledger (hash chain) + verification routine~~ ✅ FEATURE-010
+    (D023; `verify-ledgers.mjs`; tag `known-good-3`)
+11. ~~Dashboard: policy config, approval queue, session replay~~ ✅
+    FEATURE-010 (D024; `:4005`, localhost only)
 12. Evals harness (50 synthetic negotiations) + metrics report
 13. Threat model doc, README polish, demo seed data, pitch video assets
 
@@ -115,6 +127,37 @@ Format — exactly five lines plus header:
 - Decisions: <"none" or pointer to DECISIONS.md entries added>
 
 <!-- entries begin below -->
+
+### 2026-08-28 20:00 — [Claude Fable 5 (claude-fable-5)]
+- Did: FEATURE-010 — `packages/ledger` (chain, verify naming the first
+  break, no update/delete anywhere by source search); every service
+  records messages in/out, rejections, decisions and states on its own
+  chain; settlement absorbs its money chain verbatim; operator API behind
+  `DASHBOARD_TOKEN`; dashboard `:4005` (run / queue / replay & audit /
+  policy / evals) with a token-injecting allowlisted proxy;
+  `verify-ledgers.mjs` (live + `--db` offline); resume a pending run.
+  Live: four chains verified, 19/19 and 22/22 envelopes matched across
+  parties, tamper on a copy caught at entry 5, hold approved through the
+  proxy and resumed to a real order. D023, D024. Tag `known-good-3`.
+  **Feature freeze.**
+- Left: nothing on FEATURE-010. Day 11: evals harness (50 sessions,
+  stub + live subsets; raise `FIREWALL_VELOCITY_MAX`; measure deal-close
+  rate, discount conceded, firewall catch rate, false-block AND
+  false-allow per provider on the drift fixtures, 429 fallbacks,
+  rationale floor leaks), `evals/report.json` (the dashboard tab reads
+  it), THREAT_MODEL tests reconciled, Gate 7.
+- Watch out: SQLite runs in WAL mode — an offline DB copy needs the
+  `-wal` file; the `Ledger` constructor must never write (auditors open
+  read-only); the buyer's `receiver` and the firewall's `delivery` ride
+  inside recorded envelopes and must be stripped before hashing across
+  parties; `mandate_register` is built outside `buildOutbound` (recorded
+  explicitly, keyed by mandate ref); the dashboard is published on
+  127.0.0.1 only — keep it that way; `.env` was restored after the demo
+  (`FIREWALL_ESCALATION_TIMEOUT_SEC=90`, real Mistral model).
+- Tests: Gate 0 green (329/329 + 6 skipped live-contract; lint + typecheck clean); Gate 5 all three items in the
+  library and per service + live on a copy; Gate 6 compose five healthy;
+  Gate 3/4 unchanged and green; the E2E cross-party proof.
+- Decisions: D023, D024.
 
 ### 2026-08-27 13:30 — [Claude Fable 5 (claude-fable-5)]
 - Did: FEATURE-009 — spec (§7.9 narrow-only rule, human-layer codes,

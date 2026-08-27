@@ -29,10 +29,18 @@ node scripts/negotiate.mjs --target var_bookend         # the buyer's STRATEGY w
 node scripts/negotiate.mjs --target var_relay_8ch       # firewall LAYER 1 blocks (industrial under a gifts mandate)
 node scripts/negotiate.mjs --target var_corp_hamper     # every number passes; LAYER 2 blocks or HOLDS for a human
 node scripts/review.mjs list | approve <hash> | reject <hash>   # the human, from a second terminal
+node scripts/verify-ledgers.mjs                         # all four audit chains verified + cross-party check
+node scripts/verify-ledgers.mjs --db copy.db            # verify a copied service database offline
 ```
 
-Next: the hash-chained ledger and the dashboard — see
-[docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
+**Day 10 — feature freeze.** Every service now keeps its own append-only,
+hash-chained audit ledger (every message in and out, every rejection,
+every decision and state change; settlement's money chain absorbed
+verbatim) with a verify routine that names the first broken entry, and a
+thin operator console on `http://localhost:4005` (run, approval queue,
+policy, session replay with all four chains verified + cross-party
+envelope match, evals). Days 11–13: evals, polish, video, submission —
+see [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
 
 ## Quickstart
 
@@ -40,8 +48,9 @@ Next: the hash-chained ledger and the dashboard — see
 cp .env.example .env                       # then fill in Razorpay TEST keys (+ optional LLM keys)
 pnpm install && pnpm build
 node scripts/gen-keys.mjs >> .env          # principal/firewall/settlement keys + control + review tokens
-docker compose up --build                  # merchant :4001, buyer :4002, firewall :4003, settlement :4004
+docker compose up --build                  # merchant :4001, buyer :4002, firewall :4003, settlement :4004, dashboard :4005
 node scripts/negotiate.mjs                 # one full run, every signature re-verified
+open http://localhost:4005                 # operator console: run, queue, replay & audit, policy
 ```
 
 Local development:
@@ -58,11 +67,13 @@ pnpm build && pnpm lint && pnpm typecheck && pnpm test
 | `PROTOCOL.md`         | ACNP v0.1 wire-protocol specification (normative)                   |
 | `packages/protocol`   | Schemas, canonical serialization, Ed25519 signing, replay guard     |
 | `packages/llm`        | Model-agnostic LLM adapter layer (only place vendor calls may live) |
+| `packages/ledger`     | Append-only hash-chained audit ledger (one chain per service)       |
 | `services/merchant`   | S1 Merchant Commerce Server + seller agent                          |
 | `services/buyer`      | S2 Buyer Agent                                                      |
 | `services/firewall`   | S4 Compliance Firewall (deterministic rules + LLM intent-verifier)  |
 | `services/settlement` | S5 Razorpay settlement + hash-chained ledger                        |
-| `dashboard/`          | Policy config, escalation queue, session replay, evals summary      |
+| `dashboard/`          | Operator console: run, approval queue, replay & audit, policy, evals |
+| `scripts/`            | Terminal demos: negotiate, review (the human), verify-ledgers, keys  |
 | `evals/`              | Synthetic-negotiation harness and honest metrics report             |
 | `docs/`               | Architecture, decisions, flow, threat model, test gates, handover   |
 

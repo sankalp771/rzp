@@ -104,10 +104,32 @@
   (Gate 3 items 2, 3, 5).
 
 ### T6 — Audit ledger tampering
-- Attack: post-hoc edit of ledger entries to rewrite the negotiation story.
-- Mitigation: hash-chained append-only entries; chain verification routine;
-  no update/delete paths in code.
-- Test:
+- Attack: post-hoc edit, deletion or re-hashing of ledger entries to
+  rewrite the negotiation story; or one party quietly recording a
+  different version of what was said.
+- Mitigation: every service keeps its own append-only, hash-chained
+  ledger (`packages/ledger`, D023): `entry_hash = sha256(prev ‖
+  JCS(entry))` from a fixed genesis, so an edit of entry *k* breaks
+  verification at *k*, a re-hash of *k* breaks at *k+1*, a deletion is a
+  sequence gap, and a truncated tail changes the head every receipt and
+  verdict already cites. No update or delete path exists in any workspace
+  (source-search test). The same signed envelope is recorded by both
+  parties that exchanged it, so a party's private rewrite diverges from
+  the counterparty's record and from the signature it carries — the
+  cross-party check (`scripts/verify-ledgers.mjs`, dashboard Replay)
+  compares by `message_id` and canonical hash / signature. Settlement's
+  money chain (D018) is absorbed verbatim, so the receipt's
+  `ledger_entry_hash` is findable in both chains. **Honest limit:** a
+  party can still truncate its own tail before anyone cited the head;
+  cross-party anchoring of chain heads is a v0.2 candidate.
+- Test: `packages/ledger/src/ledger.test.ts` "TAMPER: an out-of-band
+  edit of entry k is reported at exactly k", "re-hashing … moves the
+  break to k+1", "deleting entry k is a sequence gap", "no update/delete
+  path for ledger_entries anywhere"; `merchant/ledger.test.ts` "TAMPER
+  over HTTP"; `firewall/app.test.ts` "… tamper breaks at that entry";
+  `settlement/app.test.ts` "… tamper breaks at that entry";
+  `buyer/e2e.test.ts` "every envelope the buyer sent the seller is in the
+  merchant chain with the same hash (and back)" (Gate 5 items 1–3).
 
 ### T7 — Settlement duplication or runaway retries
 - Attack/failure: network flaps cause repeated order creation.
@@ -155,6 +177,17 @@
   triggers a spending workflow) is gated by a shared-secret header
   (`CONTROL_TOKEN`, D014) and refuses to serve without it — demo-grade by
   design; production would sit behind real operator authentication.
+- **One operator, every party (D024):** the ledger read API on all four
+  services is gated by ONE shared `DASHBOARD_TOKEN`, and the dashboard
+  proxies with that token plus the review and control tokens. Whoever
+  holds it — or reaches the console — reads every party's chain
+  (including the principal's budget and preferences on the buyer's side)
+  and acts as the human reviewer, the merchant's policy owner and the
+  buyer's operator. That is a fully trusted operator console, correct for
+  a demo where the operator is every party and published on localhost
+  only; a real deployment gives each party its own read token (the
+  buyer's chain must never be readable by the seller's side) and puts
+  operator identity in front of the console.
 - A real payer: the buyer is an agent — there is no card tap and no
   checkout UI. Settlement creates a real Razorpay test-mode order, then
   (with `PAYMENT_SIMULATION` on, loud at boot and in `/health`) posts a

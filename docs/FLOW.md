@@ -199,10 +199,42 @@ a per-session circuit breaker (planned).
 
 ## F6 — Ledger write path (cross-cutting)
 
-Every event above → ledger service: fetch previous entry hash → build entry
-(event payload + prev hash + timestamp) → compute entry hash → append. The
-"verify audit trail" dashboard action walks the full chain recomputing hashes
-and reports the first break, if any.
+There is no ledger service (D023): each of the four services keeps its own
+append-only chain (`ledger_entries`, `packages/ledger`) in its own SQLite.
+On every step above the service appends, in one transaction: read the
+head → build the entry `{entry_seq, at, entry_type, session_id, ref,
+payload}` → `entry_hash = sha256(prev_entry_hash ‖ JCS(entry))` → insert.
+What is appended, per party:
+- **Messages:** every message that passed the boundary (`MESSAGE_IN`, the
+  full signed envelope), every signed message sent or replied
+  (`MESSAGE_OUT`, with the `receiver` since streams are per receiver, and
+  for the firewall's pushes the `delivery` outcome), every boundary
+  rejection (`BOUNDARY_REJECTED`, session id recorded as *claimed*, never
+  trusted), every handler-level refusal (`HANDLER_REJECTED`). Polled
+  messages (verdicts, receipts) are `MESSAGE_IN` once verified.
+- **Decisions:** merchant `BOUNDS_CLAMPED` and `LLM_MOVE`; buyer
+  `LLM_MOVE`; firewall `VERDICT` (with the details and verifier
+  attribution the wire never carries), `VERIFIER_ABSENT`,
+  `ESCALATION_DECIDED`, `ESCALATION_TIMEOUT`; settlement
+  `SETTLEMENT_EVENT` (D018's money-chain event verbatim, including its
+  own `entry_hash`, so a receipt's `ledger_entry_hash` is in both chains).
+- **State:** every party's own §9 transition (`SESSION_STATE`), so
+  divergence between parties is provable from the two records.
+
+**Reading it (D024):** `GET /ledger?session_id=|ref=|entry_type=|after=`,
+`GET /ledger/verify`, `GET /sessions` on each service behind
+`DASHBOARD_TOKEN`. Verification is always whole-ledger: chains are per
+service with sessions interleaved, so a session slice is a *view*, not a
+sub-chain. `scripts/verify-ledgers.mjs` (terminal) and the dashboard's
+Replay tab (browser, through the proxy) both do the same two things:
+verify all four ledgers, and cross-check one session — every `MESSAGE_OUT`
+one party recorded must match, by `message_id` and canonical hash (the
+script) or signature (the page), the `MESSAGE_IN` another party recorded.
+The honest claim is therefore "whole ledger verified ✓ + this session's
+envelopes match across parties ✓". An out-of-band edit of entry *k* makes
+`verify` report `break_at_seq: k` with the reason; the script can also
+verify a copied database offline (`--db`), which is how the tamper demo
+runs without touching a live volume.
 
 ## F7 — Evals run
 

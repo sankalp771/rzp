@@ -104,19 +104,33 @@ layers, strict order:
 - Razorpay Orders API, **test mode only**. Idempotency keys on every create;
   webhook-driven payment confirmation; retry with exponential backoff and a
   retry ceiling; refund path for the graceful-failure story.
-- **Audit ledger**: append-only, hash-chained — each entry embeds the hash of
-  the previous entry, so tampering is detectable by walking the chain. All
-  protocol messages, firewall verdicts, and settlement events are entries.
-- Ledger verification routine: recompute the chain end-to-end; exposed in the
-  dashboard as a "verify audit trail" action.
+- **Audit ledger** (`packages/ledger`, D023): append-only, hash-chained —
+  each entry embeds the hash of the previous entry, so tampering is
+  detectable by walking the chain. There is no ledger service: **every
+  service keeps its own chain** in its own database and records every
+  message in and out, every rejection, and its own decisions and state
+  transitions (FLOW F6). Settlement additionally keeps D018's per-mandate
+  money chain and absorbs it verbatim into its ledger. No update or delete
+  path exists anywhere (source-search test).
+- Ledger verification routine: `verify()` recomputes the whole chain and
+  names the first broken entry; exposed as `GET /ledger/verify` on each
+  service, in `scripts/verify-ledgers.mjs`, and in the dashboard's Replay
+  tab. Cross-party consistency: the same signed envelope appears in both
+  parties' chains and is compared by `message_id` + hash/signature.
 
-## 3. Dashboard (thin, supporting)
-- Merchant policy configuration (floors, discounts, rules).
-- Escalation approval queue (firewall verdict = escalate).
-- Session replay: step-by-step view of a negotiation from the audit log —
-  negotiation transcript and signed audit trail side by side (the pitch
-  money-shot screen).
-- Evals summary page: metrics table from the latest eval run.
+## 3. Dashboard (thin, supporting; D024)
+One static page + a proxy (`dashboard/`, `:4005`, localhost only) that
+injects the operator secrets server-side. Tabs: **Run** (start a demo with
+the target picker), **Queue** (holds with goal vs. cart; approve/reject),
+**Replay & audit** (one session's entries from all four ledgers merged in
+time; "whole ledger verified ✓" per party + "this session's envelopes
+match across parties ✓"), **Policy** (merchant discount ceilings, rounds,
+capabilities — floors stay per variant), **Evals** (reads
+`evals/report.json` when Day 11 writes it). HONEST SCOPE: a fully trusted
+operator console with no login of its own — whoever reaches it reads every
+chain and acts as reviewer, policy owner and operator (THREAT_MODEL
+non-goals). Both money shots also run from the terminal
+(`scripts/verify-ledgers.mjs`) so nothing in the video depends on the UI.
 
 ## 4. Cross-cutting
 

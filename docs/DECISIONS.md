@@ -16,6 +16,85 @@ Entry format:
 
 ---
 
+### D024 — 2026-08-28 — One operator token for the read API; a thin console that proxies and injects secrets server-side; verification claims stay whole-ledger — [human + Claude Fable 5]
+- **Decision:** Every service exposes `GET /ledger`, `GET /ledger/verify`
+  and `GET /sessions` (the merchant also `GET/PUT /policy`) behind one
+  shared `DASHBOARD_TOKEN` (`x-dashboard-token`; unset → 503). The
+  dashboard (`dashboard/`, `:4005`, published on localhost only) is one
+  static page plus a Fastify proxy `/api/:party/*` restricted to an
+  allowlist of paths, which injects `DASHBOARD_TOKEN`,
+  `FIREWALL_REVIEW_TOKEN` and `CONTROL_TOKEN` server-side — the browser
+  never holds a secret. No new dependencies. `scripts/verify-ledgers.mjs`
+  performs the same verification and cross-party comparison from a
+  terminal (and verifies a copied database offline with `--db`). Any
+  claim on a single session is worded "whole ledger verified ✓ + this
+  session's envelopes match across parties ✓" — never "this session's
+  chain verified".
+- **Because:** The buyer's chain carries the principal's budget and
+  preferences, which the seller's side must never read, so the read API
+  cannot be open; one token is the cheapest real gate (memory rule: cheap
+  fix over a non-goal). A proxy is the cheapest way to keep every secret
+  out of the browser. The money shots (cross-party replay, tamper
+  detection) must not depend on ~700 lines of untested UI, hence the
+  terminal script (amendment #1). Chains are per service with sessions
+  interleaved, so a filtered slice's `prev_entry_hash` points at other
+  sessions' entries — a session is a VIEW over a verified ledger, and
+  saying more would be caught by one question (amendment #3).
+- **Instead of:** Per-party read tokens (right for production, four more
+  secrets for a demo where the operator is every party — stated as the
+  real design in THREAT_MODEL); tokens in the browser's localStorage
+  (leaks on any shared screen); a framework SPA (a dependency and a build
+  step for a function-over-form page); a per-session sub-chain (would
+  need a second chain per session — the whole point of one chain is that
+  nothing can be removed unnoticed).
+- **Tradeoff accepted:** The console is a fully trusted operator surface
+  with no login of its own — whoever reaches it reads every chain and acts
+  as reviewer, policy owner and buyer operator. Written into THREAT_MODEL
+  non-goals; the demo binds it to localhost.
+- **Revisit if:** the console is ever exposed beyond localhost — then
+  per-party tokens and operator identity come first.
+
+### D023 — 2026-08-28 — One ledger library, one chain per service, no central ledger service; settlement's money chain is absorbed verbatim — [human + Claude Fable 5]
+- **Decision:** `packages/ledger` implements PROTOCOL.md §11:
+  `ledger_entries(entry_seq, at, entry_type, session_id, ref, payload,
+  prev_entry_hash, entry_hash)` with `entry_hash = sha256(prev ‖ JCS(entry))`
+  and a 64-zero genesis (D018 generalised). Each of the four services
+  keeps its own chain in its own SQLite and appends every accepted
+  message in, every signed message out (with the receiver, since streams
+  are per receiver), every boundary rejection (without trusting the
+  claimed session id), every handler rejection, and its domain events
+  (`BOUNDS_CLAMPED`, `LLM_MOVE`, `VERDICT`, `VERIFIER_ABSENT`,
+  `ESCALATION_DECIDED`, `ESCALATION_TIMEOUT`, `SESSION_STATE`,
+  `SETTLEMENT_EVENT`). `verify()` walks the whole chain and names the
+  first broken entry and why. The library exports no update and no
+  delete; a test greps every workspace for one. Settlement keeps D018's
+  `settlement_events` as the money chain and appends each event verbatim
+  — including its money-chain `entry_hash` — as a `SETTLEMENT_EVENT`
+  inside the same transaction, so a receipt's `ledger_entry_hash` is
+  findable in both.
+- **Because:** PROTOCOL §9 says each party keeps its own state machine and
+  divergence is detectable from the ledger — that only works if each
+  party's record is its own. A central ledger service would be a trusted
+  party this architecture deliberately does not have, and a service that
+  must call another service to record what it did has a failure mode the
+  money path cannot afford (settlement must confirm money without a
+  dependency, D018). The same signed envelope in two parties' chains is
+  what makes "who said what" provable from either side. D018 pre-committed
+  "absorb rather than re-derive" and its revisit-if was exactly "if the
+  global ledger's entry format cannot embed these entries verbatim" — it
+  can.
+- **Instead of:** A ledger service (trusted party, extra hop on the money
+  path); replacing `settlement_events` (receipts already cite its hashes;
+  Day 7's Gate 5 tests keep passing); per-session chains (see D024);
+  recording only messages (clamps, moves and verdict details are the
+  evidence an eval or a panel asks for).
+- **Tradeoff accepted:** Entries are large (full envelopes, twice for a
+  cart mandate that goes to two parties); the buyer's private `receiver`
+  note and the firewall's `delivery` outcome ride inside the payload and
+  must be stripped before comparing envelopes across parties.
+- **Revisit if:** a cross-party anchor is wanted (each party periodically
+  signing its chain head into another party's chain) — v0.2 candidate.
+
 ### D022 — 2026-08-27 — The human sits above the LLM and below the policy; an escalation is decided exactly once; the queue is token-gated — [human + Claude Fable 5]
 - **Decision:** An `escalate` verdict parks the cart in the firewall's
   `escalations` table (`held_since`, `expires_at`). `GET /review` and
