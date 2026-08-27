@@ -25,6 +25,7 @@ import type { PostFn, RunResult } from './runner.js';
 export const NOW = () => new Date('2026-08-25T10:00:00.000Z');
 export const TOKEN = 'test-control-token';
 export const REVIEW_TOKEN = 'test-review-token';
+export const DASHBOARD_TOKEN = 'test-dashboard-token';
 export const principal = generateKeyPair();
 const firewallKey = generateKeyPair();
 const settlementKey = generateKeyPair();
@@ -74,6 +75,11 @@ export interface Stack {
   ) => Promise<{ status: number; body: Record<string, unknown> }>;
   /** Poll the queue until one hold appears, then decide it (runs beside a run()). */
   decideWhenHeld: (decision: 'approve' | 'reject') => Promise<string>;
+  /** Operator API GET on a party (`/ledger?…`, `/ledger/verify`, `/sessions`), token injected. */
+  api: (
+    party: 'merchant' | 'buyer' | 'firewall' | 'settlement',
+    path: string,
+  ) => Promise<{ status: number; body: Record<string, unknown> }>;
   /** Await the merchant's background receipt poll. */
   drain: () => Promise<void>;
   close: () => Promise<void>;
@@ -104,6 +110,7 @@ export async function makeStack(opts: StackOptions = {}): Promise<Stack> {
   const merchant = buildMerchantApp({
     db: merchantDb,
     now: NOW_,
+    dashboardToken: DASHBOARD_TOKEN,
     ...(opts.sellerLlm ? { llm: opts.sellerLlm } : {}),
     chain: {
       firewallPublicKey: firewallKey.publicKey,
@@ -188,6 +195,7 @@ export async function makeStack(opts: StackOptions = {}): Promise<Stack> {
     post,
     mandate,
     controlToken: TOKEN,
+    dashboardToken: DASHBOARD_TOKEN,
     ...(opts.buyerLlm ? { llm: opts.buyerLlm } : {}),
     chain: {
       firewallUrl: FIREWALL_URL,
@@ -217,6 +225,15 @@ export async function makeStack(opts: StackOptions = {}): Promise<Stack> {
     razorpay,
     pending,
     review,
+    api: async (party, path) => {
+      const app = { merchant, buyer, firewall, settlement }[party];
+      const res = await app.inject({
+        method: 'GET',
+        url: path,
+        headers: { 'x-dashboard-token': DASHBOARD_TOKEN },
+      });
+      return { status: res.statusCode, body: res.json() as Record<string, unknown> };
+    },
     decideWhenHeld: async (decision) => {
       // The buyer polls /verdict with a no-op sleep, so every await here
       // interleaves with its loop — a human deciding mid-run, in one process.

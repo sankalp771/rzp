@@ -11,12 +11,14 @@ import {
   type CatalogItem,
   type ErrorCode,
   type IntentMandate,
+  type JsonValue,
   type KeyPair,
   type LineItem,
   type Message,
   type MessageType,
 } from '@negotiator/protocol';
 import { StubLlmAdapter, proposeMove, type LlmAdapter, type MoveRecord } from '@negotiator/llm';
+import type { Ledger } from '@negotiator/ledger';
 import { SqliteReplayStore, type BuyerDb } from './db.js';
 import { buildMandateRegister } from './mandate.js';
 import { shortlist } from './shortlist.js';
@@ -96,6 +98,8 @@ export interface RunnerDeps {
   post: PostFn;
   chain: BuyerChainConfig;
   log: RunnerLog;
+  /** The buyer's own append-only audit chain (PROTOCOL §11, D023). */
+  ledger: Ledger;
   now?: () => Date;
   clockSkewSec?: number;
   tuning?: { opening_ratio: number; concession_exponent: number };
@@ -219,6 +223,11 @@ export class BuyerRunner {
       mandateRef,
       this.llm.modelId, // model-per-side recorded in every session (D008)
       this.now().toISOString(),
+    );
+    this.deps.ledger.append(
+      'SESSION_STATE',
+      { state: 'INIT', buyer_model: this.llm.modelId, intent_mandate_ref: mandateRef },
+      { session_id: sessionId },
     );
 
     const transcript: TranscriptEntry[] = [];
@@ -453,6 +462,11 @@ export class BuyerRunner {
         }
         if (v.body.verdict !== 'escalate') {
           transcript.push({ direction: 'received', message: v });
+          // Polled, verified, acted on: evidence (§11).
+          this.deps.ledger.append('MESSAGE_IN', asPayload(v), {
+            session_id: v.session_id,
+            ref: hash,
+          });
           return v;
         }
       }
@@ -484,6 +498,7 @@ export class BuyerRunner {
           throw new RunFailure('SIG_INVALID', 'receipt does not verify against the settlement key');
         }
         transcript.push({ direction: 'received', message: r });
+        this.deps.ledger.append('MESSAGE_IN', asPayload(r), { session_id: sessionId, ref: hash });
         notes.push(`receipt received after ${polls} poll(s)`);
         return r.body;
       }
@@ -561,6 +576,18 @@ export class BuyerRunner {
         record.fallback_reason ?? null,
         record.latency_ms,
       );
+    this.deps.ledger.append(
+      'LLM_MOVE',
+      {
+        round: nextRound,
+        role: 'buyer',
+        model_id: record.model_id,
+        used_llm: record.used_llm,
+        fallback_reason: record.fallback_reason ?? null,
+        latency_ms: Math.round(record.latency_ms),
+      },
+      { session_id: sessionId },
+    );
     stats.calls += 1;
     if (!record.used_llm) {
       stats.fallbacks += 1;
@@ -856,12 +883,14 @@ export class BuyerRunner {
     if (!checked.ok) {
       // The reply failed signature/schema/replay checks — it never reaches
       // the strategy, and it does NOT consume the sender's seq (§6).
+      this.rejected(sessionId, checked.code, checked.detail);
       throw new RunFailure(checked.code, checked.detail);
     }
     // Authenticated: consume the sender's seq now, before semantic checks
     // (§6 — authenticated-but-rejected still consumes).
     checked.commit();
     transcript.push({ direction: 'received', message: checked.message });
+    this.deps.ledger.append('MESSAGE_IN', asPayload(checked.message), { session_id: sessionId });
     const msg = checked.message;
     if (msg.type === 'error') {
       const err = msg.body as BodyOf<'error'>;
@@ -894,13 +923,24 @@ export class BuyerRunner {
     if (checked.ok) {
       checked.commit();
       transcript.push({ direction: 'received', message: checked.message });
+      this.deps.ledger.append('MESSAGE_IN', asPayload(checked.message), { session_id: sessionId });
       if (checked.message.type === 'error') {
         const err = checked.message.body as BodyOf<'error'>;
         throw new RunFailure(err.code, err.detail);
       }
       return sent; // unexpected but authenticated non-error reply: tolerated on close
     }
+    this.rejected(sessionId, checked.code, checked.detail);
     throw new RunFailure(checked.code, checked.detail);
+  }
+
+  /** F5 on the buyer side: a reply that failed the boundary is on record, never acted on. */
+  private rejected(sessionId: string, code: string, detail: string): void {
+    this.deps.ledger.append(
+      'BOUNDARY_REJECTED',
+      { code, detail, claimed_session_id: sessionId },
+      { session_id: sessionId },
+    );
   }
 
   private buildOutbound(
@@ -921,7 +961,15 @@ export class BuyerRunner {
       timestamp: this.now().toISOString(),
       body,
     };
-    return signObject(unsigned, key.privateKey, key.publicKey) as unknown as Message;
+    const signed = signObject(unsigned, key.privateKey, key.publicKey) as unknown as Message;
+    // The receiver is not in the envelope (streams are per receiver, §6):
+    // record it, so a replay can pair this entry with the right party's chain.
+    this.deps.ledger.append(
+      'MESSAGE_OUT',
+      { ...asPayload(signed), receiver },
+      { session_id: sessionId },
+    );
+    return signed;
   }
 
   private findVariant(
@@ -978,6 +1026,7 @@ export class BuyerRunner {
     this.deps.db
       .prepare('UPDATE sessions SET state = ? WHERE session_id = ?')
       .run(state, sessionId);
+    this.deps.ledger.append('SESSION_STATE', { state }, { session_id: sessionId });
   }
 
   /** Outbound seq on the (session, receiver) stream — §6. */
@@ -994,4 +1043,9 @@ export class BuyerRunner {
       }
     ).n;
   }
+}
+
+/** A signed envelope as a ledger payload (JSON-safe by construction: JCS-signed). */
+function asPayload(m: Message): Record<string, JsonValue> {
+  return m as unknown as Record<string, JsonValue>;
 }

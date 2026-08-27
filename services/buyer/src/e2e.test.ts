@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { StubLlmAdapter } from '@negotiator/llm';
-import { verifyObject, type BodyOf, type Message } from '@negotiator/protocol';
+import { hashCanonical, verifyObject, type BodyOf, type Message } from '@negotiator/protocol';
 import { makeStack, NOW } from './stack.testkit.js';
 import type { RunResult } from './runner.js';
 
@@ -430,6 +430,83 @@ describe('E2E: layer 2 + the human queue (F3 escalate, Gate 3 items 2–4)', () 
       verdict: 'allow',
       layer: 'human',
     });
+    await stack.close();
+  });
+});
+
+/**
+ * FEATURE-010 (D023): every party keeps its own chain; the SAME signed
+ * envelopes appear in both parties' chains, so "who said what" is provable
+ * from either side and divergence is detectable by comparison.
+ */
+describe('E2E: audit ledgers (F6) — each party verifies; both sides agree', () => {
+  it('buyer and merchant chains verify, and every envelope the buyer sent the seller is in the merchant chain with the same hash (and back)', async () => {
+    const stack = await makeStack();
+    const { result } = await stack.run();
+    expect(result.outcome).toBe('settled');
+    await stack.drain();
+    expect((await stack.api('buyer', '/ledger/verify')).body).toMatchObject({ ok: true });
+    expect((await stack.api('merchant', '/ledger/verify')).body).toMatchObject({ ok: true });
+
+    type Entry = { entry_type: string; payload: Record<string, unknown> };
+    const buyerEntries = (await stack.api('buyer', `/ledger?session_id=${result.session_id}`)).body[
+      'entries'
+    ] as Entry[];
+    const merchantEntries = (await stack.api('merchant', `/ledger?session_id=${result.session_id}`))
+      .body['entries'] as Entry[];
+    // The envelope as the other side saw it: strip the buyer's private `receiver` note.
+    const envelope = (p: Record<string, unknown>) => {
+      const { receiver: _r, ...m } = p;
+      return m as unknown as Message;
+    };
+    const byId = (entries: Entry[], type: string) =>
+      new Map(
+        entries
+          .filter((e) => e.entry_type === type)
+          .map((e) => [String(e.payload['message_id']), hashCanonical(envelope(e.payload))]),
+      );
+    const buyerSent = byId(
+      buyerEntries.filter((e) => e.payload['receiver'] === 'seller'),
+      'MESSAGE_OUT',
+    );
+    const merchantGot = byId(merchantEntries, 'MESSAGE_IN');
+    expect(buyerSent.size).toBe(8); // init, catalog, 4 offers, accept, cart copy
+    for (const [id, h] of buyerSent) expect(merchantGot.get(id), id).toBe(h);
+    const merchantSent = byId(merchantEntries, 'MESSAGE_OUT');
+    const buyerGot = byId(
+      buyerEntries.filter(
+        (e) => (e.payload as { sender?: { role?: string } }).sender?.role === 'seller',
+      ),
+      'MESSAGE_IN',
+    );
+    expect(merchantSent.size).toBe(6);
+    for (const [id, h] of merchantSent) expect(buyerGot.get(id), id).toBe(h);
+    // Both sides recorded their own terminal transition.
+    const states = (entries: Entry[]) =>
+      entries.filter((e) => e.entry_type === 'SESSION_STATE').map((e) => e.payload['state']);
+    expect(states(buyerEntries).at(-1)).toBe('SETTLED');
+    expect(states(merchantEntries).at(-1)).toBe('SETTLED');
+    expect((await stack.api('buyer', '/sessions')).body['sessions']).toHaveLength(1);
+    await stack.close();
+  });
+
+  it('a tampered merchant reply is on the buyer chain as BOUNDARY_REJECTED, never as MESSAGE_IN', async () => {
+    const stack = await makeStack({
+      tamper: (reply, call) => {
+        if (call !== 3) return reply; // the first counter_offer, price rewritten in flight
+        const evil = JSON.parse(JSON.stringify(reply)) as Message<'counter_offer'>;
+        (evil.body as { total: number }).total = 1;
+        return evil;
+      },
+    });
+    const { result } = await stack.run();
+    expect(result.outcome).toBe('failed');
+    expect(result.reason).toBe('SIG_INVALID');
+    const entries = (await stack.api('buyer', `/ledger?session_id=${result.session_id}`)).body[
+      'entries'
+    ] as { entry_type: string; payload: Record<string, unknown> }[];
+    expect(entries.filter((e) => e.entry_type === 'BOUNDARY_REJECTED')).toHaveLength(1);
+    expect((await stack.api('buyer', '/ledger/verify')).body).toMatchObject({ ok: true });
     await stack.close();
   });
 });

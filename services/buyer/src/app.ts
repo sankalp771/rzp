@@ -6,7 +6,9 @@ import {
   hashCanonical,
   type IntentMandate,
 } from '@negotiator/protocol';
+import { Ledger } from '@negotiator/ledger';
 import { openDb, type BuyerDb } from './db.js';
+import { ledgerRoutes } from './ledger-routes.js';
 import { seedDemoMandate, verifyIntentMandate } from './mandate.js';
 import { BuyerRunner, type BuyerChainConfig, type GetFn, type PostFn } from './runner.js';
 
@@ -25,6 +27,8 @@ export interface AppOptions {
   llm?: LlmAdapter;
   /** Firewall + settlement addressing/keys/polling; defaults to env + fetch. */
   chain?: BuyerChainConfig;
+  /** Operator read API secret (ledger, sessions); defaults to DASHBOARD_TOKEN. */
+  dashboardToken?: string;
 }
 
 /**
@@ -45,6 +49,9 @@ export function buildApp(opts: AppOptions = {}) {
   const app = Fastify({ logger: process.env['NODE_ENV'] !== 'test' });
   const db = opts.db ?? openDb();
   const controlToken = opts.controlToken ?? process.env['CONTROL_TOKEN'];
+  const dashboardToken = opts.dashboardToken ?? process.env['DASHBOARD_TOKEN'];
+  // The buyer's own audit chain (D023), shared by every run on this db.
+  const ledger = new Ledger(db, opts.now);
 
   // Boot gate (D010): a configured-but-invalid mandate refuses to serve —
   // an agent that cannot prove its authorization must not spend. A missing
@@ -75,7 +82,25 @@ export function buildApp(opts: AppOptions = {}) {
     llm: { provider: llm.provider, model: llm.modelId },
     mandate: source?.kind ?? 'none',
     chain_configured: Boolean(chain),
+    ledger_entries: ledger.count(),
+    operator_api: dashboardToken ? 'enabled' : 'disabled (DASHBOARD_TOKEN unset)',
   }));
+
+  // Operator API (D024): this buyer's ledger and sessions, read-only.
+  const gate = ledgerRoutes(app, ledger, dashboardToken);
+  app.get('/sessions', async (req, reply) => {
+    const denied = gate(req);
+    if (denied) return reply.code(denied.status).send({ error: denied.error });
+    return reply.code(200).send({
+      sessions: db
+        .prepare(
+          `SELECT session_id, state, merchant_url, round, mandate_registered, mandate_ref, buyer_model,
+                  cart_mandate_hash, verdict, settlement_status, razorpay_order_id, created_at
+             FROM sessions ORDER BY rowid DESC LIMIT 200`,
+        )
+        .all(),
+    });
+  });
 
   app.post('/control/run', async (req, reply) => {
     if (!controlToken) {
@@ -108,6 +133,7 @@ export function buildApp(opts: AppOptions = {}) {
       post: opts.post ?? fetchPost,
       chain,
       log: app.log,
+      ledger,
       ...(opts.now ? { now: opts.now } : {}),
       clockSkewSec: Number(process.env['CLOCK_SKEW_SEC'] ?? 120),
       llm,
