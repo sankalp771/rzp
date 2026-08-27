@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * Quickstart helper: prints the long-lived keypairs and a control token as
- * .env lines. It never touches .env — copy the output in yourself, so the
- * private halves only ever live in the gitignored file you chose.
+ * Quickstart helper: prints the long-lived keypairs, the control token and
+ * the firewall review token as .env lines. It never touches .env — copy the
+ * output in yourself, so the private halves only ever live in the
+ * gitignored file you chose.
  *
  *   pnpm build && node scripts/gen-keys.mjs >> .env
  *
@@ -23,4 +24,5 @@ for (const [name, kp] of pairs) {
   lines.push(`${name}_PUBLIC_KEY=${kp.publicKey}`);
 }
 lines.push(`CONTROL_TOKEN=${randomBytes(24).toString('hex')}`);
+lines.push(`FIREWALL_REVIEW_TOKEN=${randomBytes(24).toString('hex')}`);
 console.log(lines.join('\n'));

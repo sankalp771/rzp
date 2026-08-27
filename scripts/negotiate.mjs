@@ -9,11 +9,17 @@
  *
  *   pnpm build && node scripts/negotiate.mjs            # live run via :4002
  *   node scripts/negotiate.mjs --file run.json           # render a saved result
- *   node scripts/negotiate.mjs --target var_bookend      # force the walk-away demo
- *   node scripts/negotiate.mjs --target var_ram_64       # force the firewall block demo
+ *   node scripts/negotiate.mjs --target var_bookend      # the walk-away demo (strategy stops it)
+ *   node scripts/negotiate.mjs --target var_relay_8ch    # layer 1 stops it (CATEGORY_BLOCKED)
+ *   node scripts/negotiate.mjs --target var_corp_hamper  # layer 2 / a human stops it (semantic)
  *
- * Reads CONTROL_TOKEN (and BUYER_URL_LOCAL, FIREWALL_PUBLIC_KEY,
- * SETTLEMENT_PUBLIC_KEY) from .env when not in the environment.
+ * While the run is in flight the script watches the firewall's review queue
+ * (FIREWALL_REVIEW_TOKEN) and prints a HOLD banner with the exact approve /
+ * reject command for the second terminal — the human in the loop.
+ *
+ * Reads CONTROL_TOKEN (and BUYER_URL_LOCAL, FIREWALL_URL_LOCAL,
+ * FIREWALL_REVIEW_TOKEN, FIREWALL_PUBLIC_KEY, SETTLEMENT_PUBLIC_KEY) from
+ * .env when not in the environment.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -50,20 +56,88 @@ async function obtainRun() {
   if (!token) throw new Error('CONTROL_TOKEN not set (env or .env)');
   const base = (env.BUYER_URL_LOCAL ?? 'http://localhost:4002').replace(/\/$/, '');
   const target = flag('--target');
-  const res = await fetch(`${base}/control/run`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-control-token': token },
-    body: JSON.stringify(target ? { target_variant_id: target } : {}),
-  });
-  if (!res.ok) throw new Error(`control/run → HTTP ${res.status}: ${await res.text()}`);
-  return res.json();
+  const stop = { done: false };
+  watchQueue(stop);
+  try {
+    const res = await fetch(`${base}/control/run`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-control-token': token },
+      body: JSON.stringify(target ? { target_variant_id: target } : {}),
+      // A held run waits VERDICT_POLL_TIMEOUT_MS (2 min) + receipt polling.
+      signal: AbortSignal.timeout(10 * 60 * 1000),
+    });
+    if (!res.ok) throw new Error(`control/run → HTTP ${res.status}: ${await res.text()}`);
+    return await res.json();
+  } finally {
+    stop.done = true;
+  }
+}
+
+const firewallBase = (env.FIREWALL_URL_LOCAL ?? 'http://localhost:4003').replace(/\/$/, '');
+
+/** Best-effort: which model (if any) is judging intent on this firewall. */
+async function firewallInfo() {
+  try {
+    const h = await (await fetch(`${firewallBase}/health`)).json();
+    const v = h.intent_verifier;
+    return {
+      verifier:
+        v === 'not_configured' ? 'not configured (layer 1 only)' : `${v.provider}/${v.model}`,
+      review: h.review,
+      timeoutSec: h.escalation_timeout_sec,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Watch the review queue while a run is in flight; print the hold banner
+ * once, when the cart appears there. Stops when the run returns.
+ */
+function watchQueue(stop) {
+  const token = env.FIREWALL_REVIEW_TOKEN;
+  if (!token) return;
+  const seen = new Set();
+  const tick = async () => {
+    if (stop.done) return;
+    try {
+      const res = await fetch(`${firewallBase}/review`, { headers: { 'x-review-token': token } });
+      if (res.ok) {
+        for (const p of (await res.json()).pending) {
+          if (seen.has(p.cart_mandate_hash)) continue;
+          seen.add(p.cart_mandate_hash);
+          const items = p.line_items.map((li) => `${li.category}/${li.variant_id}`).join(', ');
+          console.error(
+            [
+              '',
+              '┌' + '─'.repeat(76) + '┐',
+              `│ ⏳ HELD FOR A HUMAN — the firewall would not decide alone (times out ${p.expires_at})`,
+              `│    cart ${p.cart_mandate_hash}`,
+              `│    ${items} → ${rupees(p.total)} under goal "${p.goal}"`,
+              `│    reasons: ${p.reasons.length ? p.reasons.join(', ') : '(verifier absent)'}`,
+              ...p.details.map((d) => `│    ${d}`),
+              '│  In another terminal:',
+              `│    node scripts/review.mjs approve ${p.cart_mandate_hash}`,
+              `│    node scripts/review.mjs reject  ${p.cart_mandate_hash}`,
+              '└' + '─'.repeat(76) + '┘',
+            ].join('\n'),
+          );
+        }
+      }
+    } catch {
+      /* firewall unreachable from here: nothing to show */
+    }
+    if (!stop.done) setTimeout(tick, 2000).unref();
+  };
+  setTimeout(tick, 2000).unref();
 }
 
 const rupees = (p) => `₹${(p / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
 const pct = (x) => `${(x * 100).toFixed(1)}%`;
 const short = (h) => `${String(h).slice(0, 12)}…`;
 
-function render(run) {
+function render(run, fw) {
   let buyerKey, sellerKey, listPrice, variantId;
   for (const t of run.transcript) {
     const b = t.message.body;
@@ -88,7 +162,7 @@ function render(run) {
   lines.push(`THE NEGOTIATOR — session ${run.session_id}`);
   lines.push(`Mandate: "${run.mandate.goal}"  (ref ${short(run.mandate.intent_mandate_ref)})`);
   lines.push(
-    `Budget ceiling ${rupees(run.mandate.budget_ceiling)}  ·  buyer model ${run.models.buyer}`,
+    `Budget ceiling ${rupees(run.mandate.budget_ceiling)}  ·  buyer model ${run.models.buyer}${fw ? `  ·  intent-verifier ${fw.verifier}` : ''}`,
   );
   lines.push('═'.repeat(78));
 
@@ -173,27 +247,44 @@ function render(run) {
       `${arrow}  seq ${String(m.seq).padStart(2)}  ${m.type.padEnd(18)} ${detail}  [${sig}]`,
     );
     if (b.rationale) lines.push(`             "${b.rationale}"`);
+    if (b.verifier_summary) lines.push(`             verifier: "${b.verifier_summary}"`);
     if (llm && !llm.used_llm) lines.push(`             (curve — ${llm.fallback_reason})`);
   }
 
   lines.push('─'.repeat(78));
   const settled = run.deal?.total;
+  const v = run.verdict;
+  const who =
+    v?.layer === 'human'
+      ? v.reasons.includes('ESCALATION_TIMEOUT')
+        ? 'nobody answered the review queue in time (auto-block, T10)'
+        : v.verdict === 'allow'
+          ? 'a HUMAN approved it after the verifier escalated'
+          : 'a HUMAN rejected it after the verifier escalated'
+      : v?.layer === 'intent_verifier'
+        ? 'the intent-verifier (layer 2, semantics)'
+        : 'the policy engine (layer 1, numbers)';
   if (run.outcome === 'settled' && listPrice) {
     lines.push(
       `DEAL: list ${rupees(listPrice)} → settled ${rupees(settled)}  —  ${pct(1 - settled / listPrice)} below list, in ${run.rounds} rounds`,
     );
     lines.push(
-      `SETTLED: Razorpay order ${run.receipt.razorpay_order_id} (${run.receipt.status}) · firewall verdict ${run.verdict.verdict}/${run.verdict.layer}`,
+      `SETTLED: Razorpay order ${run.receipt.razorpay_order_id} (${run.receipt.status}) · verdict ${v.verdict}/${v.layer} — ${who}`,
     );
   } else if (run.outcome === 'blocked') {
     lines.push(
-      `BLOCKED by the firewall (layer ${run.verdict.layer}): ${run.verdict.reasons.join(', ')} — agreed ${rupees(settled)} never reached settlement`,
+      `BLOCKED (layer ${v.layer}): ${v.reasons.join(', ')} — ${who}; agreed ${rupees(settled)} never reached settlement`,
     );
-    if (run.verdict.reasons.includes('VELOCITY_LIMIT')) {
+    if (v.reasons.includes('VELOCITY_LIMIT')) {
       lines.push(
         '  demo hint: raise FIREWALL_VELOCITY_MAX (or wait for FIREWALL_VELOCITY_WINDOW_SEC) — velocity is per principal',
       );
     }
+  } else if (run.outcome === 'pending' && run.reason === 'HELD_IN_REVIEW') {
+    lines.push(
+      `HELD: the firewall escalated and no human decided within the buyer's window — the cart is still in the queue${fw?.timeoutSec ? ` (auto-blocks ${fw.timeoutSec}s after the hold)` : ''}`,
+    );
+    lines.push(`  node scripts/review.mjs approve ${run.cart_mandate_hash}   (or reject)`);
   } else if (run.outcome === 'pending') {
     lines.push(
       `PENDING: verdict allow, but no receipt within the polling window (${run.reason}) — check settlement /receipt/${run.cart_mandate_hash}`,
@@ -210,6 +301,7 @@ function render(run) {
   return lines.join('\n');
 }
 
+const fw = flag('--file') ? null : await firewallInfo();
 const run = await obtainRun();
-console.log(render(run));
+console.log(render(run, fw));
 if (flag('--json')) console.log(JSON.stringify(run));

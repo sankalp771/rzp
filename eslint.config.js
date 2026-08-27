@@ -10,7 +10,14 @@ export default tseslint.config(
     // Plain Node scripts (demo/ops tooling) outside the TS packages.
     files: ['scripts/**/*.mjs'],
     languageOptions: {
-      globals: { process: 'readonly', console: 'readonly', fetch: 'readonly', URL: 'readonly' },
+      globals: {
+        process: 'readonly',
+        console: 'readonly',
+        fetch: 'readonly',
+        URL: 'readonly',
+        setTimeout: 'readonly',
+        AbortSignal: 'readonly',
+      },
     },
   },
   {
