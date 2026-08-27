@@ -3,6 +3,7 @@
   "references": [
     { "path": "packages/protocol" },
     { "path": "packages/llm" },
+    { "path": "packages/ledger" },
     { "path": "services/merchant" },
     { "path": "services/buyer" },
     { "path": "services/firewall" },

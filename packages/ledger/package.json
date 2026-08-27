@@ -1,0 +1,26 @@
+{
+  "name": "@negotiator/ledger",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Append-only, hash-chained audit ledger (PROTOCOL.md §11). One chain per service; no update, no delete (CONSTRAINTS #7).",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@negotiator/protocol": "workspace:*",
+    "better-sqlite3": "^13.0.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0"
+  }
+}

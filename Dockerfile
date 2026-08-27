@@ -9,6 +9,7 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json tsconfig.json ./
 COPY packages/protocol/package.json packages/protocol/
 COPY packages/llm/package.json packages/llm/
+COPY packages/ledger/package.json packages/ledger/
 COPY services/${SERVICE}/package.json services/${SERVICE}/
 RUN pnpm install --frozen-lockfile --filter "@negotiator/${SERVICE}..."
 COPY packages ./packages
