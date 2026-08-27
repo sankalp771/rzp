@@ -69,12 +69,27 @@ layers, strict order:
    purchase (a pending escalate counts as in use). Every violated rule is
    listed. Pure code; the test suite greps the firewall source to prove
    no LLM import exists outside the (Day 9) verifier module.
-2. **LLM intent-verifier** (runs only if layer 1 passes; Day 9): audits
-   whether the cart semantically matches the ORIGINAL signed Intent
-   Mandate — catches drift (e.g., mandate implies 1 item, cart holds 3;
-   goal says "gift", cart is server hardware).
-- Verdicts: `allow` / `block` / `escalate` — escalate lands in a human
-  approval queue in the dashboard; settlement is held until a human decides.
+2. **LLM intent-verifier** (`intent.ts`, runs only if layer 1 passes;
+   D021): audits whether the cart semantically matches the ORIGINAL
+   signed Intent Mandate — catches drift (e.g., mandate implies 1 item,
+   cart is a "pack of 12"; goal says "gift for spouse", cart is a B2B
+   lot). Principal text and seller snapshots are both fenced as
+   untrusted. It returns a strict-JSON recommendation or `absent`; it
+   never sees storage, the wire, or the dispatch path (source-search
+   test). `FIREWALL_LLM_PROVIDER` unset = no verifier, loudly (layer 1
+   only) — there is no fake auditor. Own budget: `FIREWALL_LLM_BUDGET_MS`.
+- Verdicts: `allow` / `block` / `escalate` — **layer 2 can only narrow**:
+  clean allow → allow (`layer: intent_verifier`), block with reasons →
+  block, escalate / absent / self-inconsistent → escalate. Escalate
+  lands in the human approval queue (`escalations` table; `GET/POST
+  /review` behind `FIREWALL_REVIEW_TOKEN`; `scripts/review.mjs` today,
+  the dashboard on Day 10); settlement is held until a human decides or
+  the queue times out (`ESCALATION_TIMEOUT` → block, T10).
+- **The human sits above the LLM and below the policy** (D022): approve
+  re-runs layer 1 at decision time, then re-issues `allow/human`; reject
+  → `block/human`. A hold is decided exactly once — claim + re-check +
+  appended verdict in one transaction; a late decision gets
+  `ALREADY_DECIDED`.
 - The LLM only RECOMMENDS; `applyVerdict` (D020) is the single deterministic
   decider, and a missing recommendation maps to `escalate`, never `allow`.
 - On allow the firewall dispatches `settlement_request` and delivers the

@@ -16,6 +16,96 @@ Entry format:
 
 ---
 
+### D022 — 2026-08-27 — The human sits above the LLM and below the policy; an escalation is decided exactly once; the queue is token-gated — [human + Claude Fable 5]
+- **Decision:** An `escalate` verdict parks the cart in the firewall's
+  `escalations` table (`held_since`, `expires_at`). `GET /review` and
+  `POST /review/:hash {decision, reviewer, note}` are gated by
+  `FIREWALL_REVIEW_TOKEN` (unset → 503, like `CONTROL_TOKEN`). A
+  decision — human approve, human reject, or queue timeout — is claimed
+  with `UPDATE escalations SET status='decided' … WHERE status='pending'`
+  in the SAME synchronous transaction that appends the human verdict
+  (seq n+1 on the append-only `verdicts` table) and moves the session;
+  `changes === 0` means someone else decided first → `ALREADY_DECIDED`
+  (HTTP 409 with the standing verdict), never a further verdict. Approve
+  re-runs layer 1 at decision time by the firewall's clock; a failed
+  re-check yields `block/policy` with the layer-1 reasons — a human can
+  override semantic doubt, never policy. Approve → `allow/human/
+  [HUMAN_APPROVED]` then the same dispatch + seller-notify path as an
+  immediate allow; reject → `block/human/[HUMAN_REJECTED]`; timeout →
+  `block/human/[ESCALATION_TIMEOUT]`, evaluated lazily on every
+  `/verdict` and `/review` read and by an unref'd timer
+  (`FIREWALL_ESCALATION_SWEEP_MS`). The buyer treats a hold whose poll
+  window (`VERDICT_POLL_TIMEOUT_MS`, 120 s) closes as `pending`, never
+  `failed`. Recorded in PROTOCOL.md §7.9.
+- **Because:** With a lazy sweep AND a timer AND a human endpoint, a human
+  approving at second 599.9 while the sweep marks timeout would otherwise
+  append seq 2 = timeout-block and seq 3 = human-allow and dispatch money
+  on a cart already announced as blocked — the approval amendment closed
+  exactly this: first decision wins, atomically (same family as
+  FEATURE-008 #3, `MANDATE_IN_REVIEW`). Re-running layer 1 on approve
+  keeps expiry, velocity and one-mandate rules deterministic even when a
+  human is in the loop. A token on the queue is one env var and five
+  lines (memory rule: cheap real fix over a non-goal). Lazy + timer
+  because fake-clock tests need determinism and an unpolled hold must
+  still expire.
+- **Instead of:** A mutable "current verdict" column (would violate the
+  append-only rule and hide the history); letting the human override
+  layer 1 (a human cannot un-expire a mandate); a timer-only sweep (an
+  unpolled test hold never expires; a polled one could return stale
+  state); an unauthenticated `/review` declared as a non-goal (the fix is
+  cheaper than the sentence); treating a closed buyer poll window as
+  `FAILED` (a lie — the cart is still held and decidable).
+- **Tradeoff accepted:** A held buyer run cannot resume after its window
+  closes (v0.1 prints the hash; Day 10 carries "resume a held session");
+  the human queue is a bearer token, not operator auth (demo grade, stated
+  in `.env.example`).
+- **Revisit if:** the dashboard (Day 10) adds real operator identity — the
+  token then becomes its session, not the API's.
+
+### D021 — 2026-08-27 — Layer 2 can only narrow, never widen; `stub` means no verifier; three providers, three roles — [human + Claude Fable 5]
+- **Decision:** `services/firewall/src/intent.ts` is the only firewall
+  module that may import `@negotiator/llm` (source-search test). It asks
+  one question — does this cart semantically satisfy the STORED mandate?
+  — with the principal's text and the seller's snapshots both fenced as
+  untrusted, and returns a strict-JSON recommendation
+  `{recommendation, reasons: INTENT_DRIFT_*[], summary}` or `absent`
+  (timeout, 429, non-JSON, unknown code, schema miss). `applyVerdict`
+  (verdict.ts, pure data, no LLM import) maps it: clean `allow` → allow
+  (`layer: intent_verifier`); `block` with ≥1 reason → block; `escalate`
+  → escalate; absent → escalate; self-inconsistent (`allow` carrying
+  reasons, `block` carrying none) → escalate. No input yields an allow
+  layer 1 did not already grant. `FIREWALL_LLM_PROVIDER` unset/`stub` →
+  `'not_configured'` (layer 1 only, `layer: policy` on every verdict,
+  loud in `/health` and the log); a named provider with a missing key
+  refuses to boot (D015). The verifier gets its own budget
+  (`FIREWALL_LLM_BUDGET_MS`, 8 s) so `30 s > 8 + 8 + 5 + processing`
+  holds. The demo runs Gemini (buyer), Groq (seller), Mistral (firewall).
+- **Because:** CONSTRAINTS #6 — the LLM recommends, code decides — is
+  only meaningful if the decision table is exhaustive and written down;
+  the self-consistency rule means the applier trusts only explanations
+  that agree with themselves, so a confused model is a hold, not a
+  decision. D020 pre-committed absence → escalate; this entry makes the
+  rest of the table equally explicit. A stub auditor that allowed
+  everything would be a fake, and one that answered nothing would
+  escalate every key-less quickstart run — "not configured, loudly" is
+  the honest third option. Separate providers per role mean a
+  rate-limited buyer (Gemini 429s on Day 8) never starves the verifier.
+- **Instead of:** Mapping an LLM `block` to `escalate` always (safer, but
+  the spec allows layer-2 block, block does not consume the mandate, and
+  an unexplained block still escalates); a confidence score (unfalsifiable
+  and overfit); letting the verifier see the database or the dispatch
+  path (it returns data only — the source-search test proves it cannot
+  reach storage, the wire, or settlement); a shared 12 s budget (5 s of
+  slack under the buyer's 30 s window).
+- **Tradeoff accepted:** A block from a flaky model on a benign cart is a
+  false block — it costs the buyer a renegotiation, not money; the Day 11
+  evals measure the false-block and false-allow rates per model. Live
+  models may still allow the flagship hamper — that transcript is a
+  finding (the human layer above it exists for this), not a failed demo.
+- **Revisit if:** the evals show a provider's false-allow rate on the
+  drift fixtures is material — then the default for that provider's
+  `allow` on flagged categories becomes `escalate`.
+
 ### D020 — 2026-08-26 — The verdict applier is the only decider; the layer-2 slot is explicit and its absence means escalate; dispatch happens inside the verdict — [human + Claude Fable 5]
 - **Decision:** `applyVerdict(layer1, layer2)` in `services/firewall/src/verdict.ts`
   is the single place a verdict is decided (CONSTRAINTS #6). Layer 1

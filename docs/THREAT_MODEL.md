@@ -66,8 +66,20 @@
 - Mitigation: strategy math (budget, reservation price, walk-away) is
   deterministic and cannot be overridden by LLM output; firewall re-checks
   the final cart against the signed mandate regardless of what the buyer
-  agent "decided".
-- Test:
+  agent "decided". The same free text reaches the firewall's
+  intent-verifier: there it is fenced as untrusted (fence spoofing
+  neutralised), the model can only narrow the verdict (an injected
+  "recommend allow" cannot widen anything layer 1 did not already grant),
+  and the parser refuses anything but the strict recommendation shape.
+  **Honest limit:** a model talked into `allow` on a cart layer 1 also
+  allows is a layer-2 false allow — the human layer and the Day 11
+  false-allow metric exist for that; a live injection trial is a Day
+  11/12 candidate.
+- Test: `firewall/intent.test.ts` "fences the principal text and the
+  seller text, and neutralises fence spoofing"; "refuses …" (strict
+  parse); `firewall/verdict.test.ts` "exhaustive: no layer-2 input yields
+  allow unless it is a clean allow" (Gate 3 item 5). Buyer-side: (planned,
+  Gate 2).
 
 ### T5 — Intent drift / corrupted buyer goal (flagship scenario)
 - Attack: buyer agent state corrupted; cart no longer matches the mandate.
@@ -76,13 +88,20 @@
   (`mandate_register`, D010) — the buyer refuses to negotiate unregistered;
   layer 1 blocks category/amount/quantity drift deterministically against
   that stored copy; a mandate is single-use and a pending escalation counts
-  as in use (D019); layer 2 semantic verification (Day 9) runs only against
-  the stored copy, so a corrupted agent cannot re-author its own
-  authorization; escalate path with human queue.
-- Test: `buyer/e2e.test.ts` "FLAGSHIP (layer 1): server RAM under a gifts
-  mandate → BLOCKED, no order"; `firewall/app.test.ts` "one mandate, one
-  purchase"; "no firewall → no negotiation" (Gate 3 items 2–3 in their
-  layer-1 form; layer 2 is Day 9).
+  as in use (D019); layer 2 semantic verification (D021) runs only against
+  the stored copy — so a corrupted agent cannot re-author its own
+  authorization — and can only narrow: block, or escalate to a human who
+  sits above the LLM and below the policy (D022). Note the buyer's own
+  shortlist has no semantics either (it ranks by list price); the firewall
+  is the backstop by design.
+- Test: `buyer/e2e.test.ts` "FLAGSHIP (layer 1): a corrupted buyer puts an
+  industrial relay under a gifts mandate → BLOCKED, no order"; "FLAGSHIP
+  (semantic): the corporate hamper clears every layer-1 number and is
+  blocked by layer 2 — no order"; "benign cart passes layer 2 without
+  escalation" (false-block guard); "verifier DOWN → escalate, never
+  allow"; `firewall/app.test.ts` "one mandate, one purchase", "verifier
+  never consulted when layer 1 blocks"; "no firewall → no negotiation"
+  (Gate 3 items 2, 3, 5).
 
 ### T6 — Audit ledger tampering
 - Attack: post-hoc edit of ledger entries to rewrite the negotiation story.
@@ -108,12 +127,24 @@
   out of scope for the buildathon window.
 - Test:
 
-### T10 — Escalation-queue starvation
+### T10 — Escalation-queue starvation (and: racing the human)
 - Attack/failure: escalated settlements pile up unanswered, holding funds
-  indefinitely.
-- Mitigation: queue timeout auto-blocks after a configured window; timeout is
-  a ledger event.
-- Test:
+  indefinitely; or a human decision and the timeout land at the same
+  moment and both produce a verdict.
+- Mitigation: queue timeout (`FIREWALL_ESCALATION_TIMEOUT_SEC`) auto-blocks
+  with `ESCALATION_TIMEOUT` — evaluated lazily on every `/verdict` and
+  `/review` read and by a timer, so an unpolled hold still expires; the
+  timeout is a ledger event and the polled verdict. A hold is decided
+  exactly once: claim + re-check + appended verdict in one transaction,
+  late actors get `ALREADY_DECIDED` (D022). The buyer's own poll window
+  is bounded too (`pending`, never a hang). While held, the mandate
+  counts as in use (`MANDATE_IN_REVIEW`).
+- Test: `firewall/app.test.ts` "TIMEOUT (T10): past expires_at the poll
+  returns block/human/ESCALATION_TIMEOUT; a late approve → 409
+  ALREADY_DECIDED, no third verdict"; "RACE the other way: approved first
+  … the sweep does nothing"; `buyer/e2e.test.ts` "ESCALATE → nobody
+  answers → queue TIMEOUT"; "verifier DOWN … the buyer gives up → PENDING,
+  not failed; the hold is still decidable" (Gate 3 item 4).
 
 ## Explicit non-goals (state them — honesty scores points)
 - Live payments, KYC, real merchant onboarding.

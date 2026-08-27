@@ -68,12 +68,23 @@ state.
      merchant allowlist, per-principal velocity, expiry/deadline by the
      firewall's clock, one-mandate-one-purchase incl. a pending escalate
      → every violated rule listed → hard block possible (→ F3).
-   - Layer 2 LLM intent-verifier (Day 9; slot `not_configured` today,
-     visible in `/health`) → recommends allow / block / escalate →
-     `applyVerdict` enforces (D020) → append-only `verdicts` row →
-     signed `firewall_verdict` is the HTTP reply to the buyer, and is
-     delivered to the seller in its own envelope (best-effort, recorded
-     as `seller_notified`).
+   - Layer 2 LLM intent-verifier (`intent.ts`, D021; runs only on a
+     layer-1 allow; `FIREWALL_LLM_PROVIDER` unset = `not_configured`,
+     layer 1 only, visible in `/health`): one fenced question — does
+     this cart semantically satisfy the STORED mandate? — answered as a
+     strict-JSON recommendation or `absent` → `applyVerdict` enforces
+     the narrow-only table (D020/D021: clean allow → allow, block with
+     reasons → block, escalate / absent / self-inconsistent → escalate;
+     never an allow layer 1 did not grant) → append-only `verdicts` row
+     with the verifier attribution (`verifier_json`) → signed
+     `firewall_verdict` (with `verifier_summary`, untrusted prose) is the
+     HTTP reply to the buyer, and is delivered to the seller in its own
+     envelope (best-effort, recorded as `seller_notified`). Escalate →
+     `escalations` row (`expires_at`) and F3.
+     **Latency (FEATURE-009):** the verifier runs inside the buyer's HTTP
+     call too: `BUYER_HTTP_TIMEOUT_MS (30s) > FIREWALL_LLM_BUDGET_MS (8s)
+     + FIREWALL_DISPATCH_TIMEOUT_MS (8s) + FIREWALL_NOTIFY_TIMEOUT_MS (5s)
+     + processing`.
 8. On allow, **inside the same handler, before the verdict is replied**:
    **Firewall → Settlement**: `settlement_request` (the buyer's cart
    envelope + the very verdict envelope the buyer gets + the attested
@@ -119,21 +130,48 @@ not a failure of the system.
   mandate already used / in review) → nothing is sent to settlement →
   `verdicts` row + log with every reason and a human-readable detail →
   signed `firewall_verdict` (`block`, all reasons) replied to the buyer
-  and delivered to the seller → both sessions `BLOCKED`. Demo:
-  `node scripts/negotiate.mjs --target var_ram_64` (server RAM under a
-  gifts mandate → `CATEGORY_BLOCKED`).
-- **Block (layer 2 applied):** intent-verifier finds semantic mismatch with
-  the Intent Mandate → same closure path, reason includes verifier summary.
-- **Escalate:** verdict `escalate` → session held in `COMPLIANCE_REVIEW` →
-  appears in dashboard approval queue. Transport (D013): the firewall's HTTP
-  response to `cart_mandate` is the signed `escalate` verdict acknowledging
-  the hold; the buyer then polls `GET /verdict/{cart_mandate_hash}` (signed,
-  idempotent) until a terminal verdict exists. Human approves (verdict
-  re-issued with `layer: human`, resume F1 step 8) or rejects (block closure
-  path). Timeout on the queue → `ESCALATION_TIMEOUT` ledger event →
-  auto-block → the poll returns the `block` verdict.
-- **Flagship demo:** buyer seeded with corrupted goal walks this path and is
-  caught between step 7 and 8.
+  and delivered to the seller → both sessions `BLOCKED`. Layer 2 is never
+  consulted. Demo: `node scripts/negotiate.mjs --target var_relay_8ch`
+  (an industrial relay under a gifts mandate → `CATEGORY_BLOCKED`; the
+  ₹18,500 RAM kit ends in a walk-away instead — the strategy stops it).
+- **Block (layer 2):** every layer-1 number passes; the intent-verifier
+  recommends `block` with ≥1 `INTENT_DRIFT_*` reason → same closure path,
+  `layer: intent_verifier`, `verifier_summary` on the wire; the mandate is
+  NOT consumed (a compliant cart may follow). Demo: `--target
+  var_corp_hamper` (a pack of 12 branded calendars for client
+  distribution, category gifts, ₹4,700 — only semantics can stop it).
+- **Escalate:** the verifier recommends `escalate`, is absent (timeout,
+  429, unparseable) or contradicts itself → verdict `escalate`
+  (`layer: intent_verifier`) → `escalations` row (`held_since`,
+  `expires_at = now + FIREWALL_ESCALATION_TIMEOUT_SEC`) → both sessions
+  held in `COMPLIANCE_REVIEW`; the buyer's row says `verdict=escalate`.
+  Transport (D013): the firewall's HTTP response to `cart_mandate` is the
+  signed `escalate` verdict acknowledging the hold; the buyer then polls
+  `GET /verdict/{cart_mandate_hash}` (signed, idempotent, sweeps expired
+  holds first) for `VERDICT_POLL_TIMEOUT_MS` (120 s). The queue:
+  `GET /review` lists holds (goal, items, reasons, verifier attribution);
+  `POST /review/{hash} {decision, reviewer, note}` decides — both behind
+  `x-review-token` (`scripts/review.mjs`, the Day 10 dashboard). **A hold
+  is decided exactly once (D022):** the claim, the layer-1 re-check and
+  the appended human verdict are one transaction; a late human or a late
+  sweep gets `ALREADY_DECIDED`, never a second verdict.
+  - **Approve** → layer 1 re-run by the firewall's clock (expired /
+    consumed / velocity → `block/policy` with those reasons) → else
+    `allow/human/[HUMAN_APPROVED]` appended as seq 2 → dispatch to
+    settlement + seller notification exactly as F1 step 8 → the buyer's
+    poll returns the allow → `SETTLING` → receipt → `SETTLED`.
+  - **Reject** → `block/human/[HUMAN_REJECTED]` → block closure path.
+  - **Timeout (T10)** → `block/human/[ESCALATION_TIMEOUT]` (also a ledger
+    event) issued by the sweep (lazy on reads + `FIREWALL_ESCALATION_SWEEP_MS`
+    timer) → the poll returns it → `BLOCKED`.
+  - **Buyer gives up** (window closes, human still thinking) → outcome
+    `pending` / `HELD_IN_REVIEW`, state stays `COMPLIANCE_REVIEW`, the hash
+    is in the notes and the hold remains decidable (resuming the run is
+    Day 10). Never `FAILED`.
+- **Flagship demo (three stops, three defenses):** `--target var_bookend`
+  → the strategy walks away; `--target var_relay_8ch` → layer 1 blocks;
+  `--target var_corp_hamper` → layer 2 blocks or holds for a human, who
+  approves/rejects from a second terminal while the transcript waits.
 
 ## F4 — Settlement failure & retry
 

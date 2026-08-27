@@ -8,37 +8,45 @@ handoff entries scroll down.
 
 ## Current state (edit in place)
 
-**Phase:** Week 2, Day 8 done. **The F1 chain closes live:** intent →
-registration → negotiation → signed cart → deterministic verdict → real
-Razorpay test order (`order_TUOpxWo7bDMyht`) → signed receipt, every side
-`SETTLED`; and the F3 block demo (`--target var_relay_8ch` →
-`CATEGORY_BLOCKED`, settlement never sees the cart). Tag `known-good-1`.
+**Phase:** Week 2, Day 9 done. **Both firewall layers and the human in
+the loop, live:** the vase run allowed at `layer intent_verifier`
+(Mistral) → real order `order_TUiS4AeOYaEB10`; the corporate hamper
+(every layer-1 number passes) blocked by layer 2 with
+`INTENT_DRIFT_CATEGORY`; under a real provider failure every cart
+escalated and the queue was driven from a second terminal: approve →
+`allow/human` seq 2 → real order `order_TUiVCzCWcfN4Fc`; reject →
+`HUMAN_REJECTED`; nobody → `ESCALATION_TIMEOUT` at 90 s inside the
+buyer's 120 s window. Tag `known-good-2`.
 **Done:** Docs system; stack decided (D006–D009); repo scaffold
 (FEATURE-001); ACNP spec + protocol library (FEATURE-002/003); merchant
 server (FEATURE-004); buyer agent (FEATURE-005, D014); LLM adapter layer
 (FEATURE-006, D015/D016); settlement (FEATURE-007, D017/D018); firewall
-layer 1 + verdict applier + settlement dispatch, buyer registration/cart/
-verdict/receipt legs, merchant cart-copy/verdict/receipt legs, demo
-transcript (FEATURE-008, D019/D020; spec: `catalog_item` in cart line
-items, per-receiver seq streams, one-mandate-one-purchase; BUG-004).
+layer 1 + chain closes (FEATURE-008, D019/D020, BUG-004); firewall layer
+2 (narrow-only intent-verifier, `intent.ts` the only LLM import) +
+token-gated human queue decided exactly once + timeout sweep + buyer
+hold → pending + merchant human-verdict handling + `review.mjs` +
+`itm_corp_hamper` (FEATURE-009, D021/D022; spec: human-layer codes).
 **In progress:** —
-**Broken / unverified:** Layer 2 (intent-verifier) and the escalation
-queue do not exist — the applier slot is the literal `not_configured`,
-`/health` says so, and the rule is written in `verdict.ts`: absence →
-escalate, never allow. The buyer's `/verdict` poll loop has no live
-exercise yet. Verdicts live in the firewall's append-only `verdicts`
-table + pino; `settlement_events` is its own chain; `llm_moves`/clamps
-are pino + rows — the Day 10 ledger absorbs all of them. A failed
-settlement dispatch is recorded (`settlement_dispatched=0`) but not
-retried; in-flight settlements are not resumed after a crash. The
-firewall cannot prove the seller produced a cart's snapshot (THREAT_MODEL
-T1 names the v0.2 fix). Razorpay's own order status stays `created` (the
-tap is simulated). Gemini returned 429s mid-run today (quota) → curve
-fallbacks, as designed. The Groq seller quoted its own floor in a
-rationale (informational, floor enforced in code — an evals metric and a
-hardening candidate). `bundle_proposal` unhandled (cut candidate).
-Mistral: contract suite only. Three LLM keys not rotated (final-day
-checklist item).
+**Broken / unverified:** Verdicts, `escalations`, `verifier_json`,
+`settlement_events`, `llm_moves`/clamps are still per-service tables +
+pino — the Day 10 ledger absorbs them. A held buyer run whose 120 s
+window closes ends `pending` with the hash printed and is NOT resumed
+(Day 10 carry-forward, together with failed-dispatch retry and
+in-flight settlement resume). `/review` is a bearer token, not operator
+identity (stated in `.env.example`; Day 10 dashboard). Mistral never
+escalated on its own today (allow vase / block hamper) — the queue was
+exercised via a retired model id, i.e. a real provider failure, not a
+model "escalate"; the Day 11 evals must measure false-allow / false-block
+per provider on the drift fixtures. A prompt-injection trial against the
+verifier has not been run live (Day 11/12 candidate). The firewall
+cannot prove the seller produced a cart's snapshot (T1, v0.2). Razorpay
+order status stays `created` (simulated tap). Gemini 429s → curve
+fallbacks (2 today). The Groq seller quoted its floor in rationale twice
+more (hardening candidate). The corrupted Gemini buyer writes
+"completely unsuitable" in its own rationale and buys anyway — the
+buyer's shortlist/strategy have no semantics by design (evals finding).
+`bundle_proposal` unhandled (cut candidate). Three LLM keys not rotated
+(final-day checklist item).
 **Do not touch / avoid:** `.env` holds real keys (gitignored): Razorpay
 test keys + webhook secret, demo principal keypair, CONTROL_TOKEN,
 long-lived FIREWALL/SETTLEMENT keys — `scripts/gen-keys.mjs` regenerates
@@ -55,6 +63,17 @@ Sequence streams are per (session, sender, receiver): a boundary
 rejection consumes nothing, the sender retries the same seq (tests use a
 `rewind` helper). The buyer sends the seller's cart copy BEFORE the
 firewall's — the firewall notifies the seller inside its own handler.
+`.env` now also holds `FIREWALL_REVIEW_TOKEN`, `FIREWALL_LLM_PROVIDER=
+mistral` and a demo `FIREWALL_ESCALATION_TIMEOUT_SEC=90` (< the buyer's
+`VERDICT_POLL_TIMEOUT_MS` 120 s, so a timeout is visible to the buyer;
+production default is 600 s). Latency: `30 s > 8 (verifier) + 8
+(dispatch) + 5 (notify)`. The hamper is listed ₹100 under the vase on
+purpose (shortlist tie-break) — do not "round it up". To demo the queue
+without waiting for a model to escalate, point `MISTRAL_MODEL` at a
+retired id and recreate the firewall (every cart then escalates);
+restore it afterwards. In tests, a fake-clock jump must wait until the
+buyer holds the escalate verdict (else `CLOCK_SKEW`), and the buyer's
+test sleep must yield a macrotask so a concurrent "human" runs.
 **Next up (ordered):**
 1. ~~Repo scaffold + Docker Compose skeleton + CI pipeline~~ ✅ FEATURE-001
 2. ~~PROTOCOL.md v0.1 review pass~~ ✅ FEATURE-002 (D010 mandate
@@ -71,8 +90,9 @@ firewall's — the firewall notifies the seller inside its own handler.
    receipt~~ ✅ FEATURE-008 (live; tag `known-good-1`)
 8. ~~Settlement: Razorpay test-mode orders + webhooks + receipt~~ ✅
    FEATURE-007 (live against Razorpay test mode)
-9. ~~Firewall layer 1 (deterministic)~~ ✅ FEATURE-008 (D019/D020), then
-   layer 2 (intent-verifier) + escalation queue — Day 9
+9. ~~Firewall layer 1 (deterministic)~~ ✅ FEATURE-008 (D019/D020);
+   ~~layer 2 (intent-verifier) + escalation queue~~ ✅ FEATURE-009
+   (D021/D022; live approve/reject/timeout; tag `known-good-2`)
 10. Audit ledger (hash chain) + verification routine
 11. Dashboard: policy config, approval queue, session replay
 12. Evals harness (50 synthetic negotiations) + metrics report
@@ -95,6 +115,31 @@ Format — exactly five lines plus header:
 - Decisions: <"none" or pointer to DECISIONS.md entries added>
 
 <!-- entries begin below -->
+
+### 2026-08-27 13:30 — [Claude Fable 5 (claude-fable-5)]
+- Did: FEATURE-009 — spec (§7.9 narrow-only rule, human-layer codes,
+  decided-exactly-once, held ⇒ pending); `intent.ts` verifier (fenced,
+  strict JSON, absent on any failure) + applier table; `escalations` +
+  `/review` behind a token, `decide()` atomic first-decision-wins with a
+  layer-1 re-check on approve, lazy + timer timeout sweep; merchant
+  human-verdict leg; buyer hold → pending + `VERDICT_POLL_TIMEOUT_MS`;
+  `itm_corp_hamper`; `review.mjs` + hold banner. Live: Mistral allowed
+  the vase (real order) and blocked the hamper on semantics; approve /
+  reject / timeout driven from a second terminal under a real provider
+  failure. D021, D022. Tag `known-good-2`.
+- Left: nothing on FEATURE-009. Day 10: hash-chained ledger absorbing
+  verdicts / escalations / settlement events / clamps + verify routine;
+  dashboard (policy, approval queue over `/review`, replay); resume a
+  held or pending run; feature freeze.
+- Watch out: `FIREWALL_ESCALATION_TIMEOUT_SEC=90` in `.env` is a demo
+  value; the hamper's ₹4,700 list is deliberate (shortlist tie-break);
+  Groq keeps quoting its floor; the corrupted buyer buys what it calls
+  unsuitable — that is the demo, not a bug; a stack test that jumps the
+  clock must wait until the buyer holds the escalate verdict.
+- Tests: Gate 0 green (307/307 + 6 skipped live-contract; lint + typecheck clean); Gate 1 spec ↔ code; Gate 3 all
+  five items (semantic form); Gate 6 escalate scenarios in the E2E;
+  Compose live: six runs, two real Razorpay orders, every signature ✔.
+- Decisions: D021, D022.
 
 ### 2026-08-26 19:30 — [Claude Fable 5 (claude-fable-5)]
 - Did: FEATURE-008 — spec (cart `catalog_item`, per-receiver seq streams,
