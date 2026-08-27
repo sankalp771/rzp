@@ -278,6 +278,13 @@ export class BuyerRunner {
     const { chain, agentId, db, log } = this.deps;
     const msg = buildMandateRegister(mandate, key, agentId, this.now);
     transcript.push({ direction: 'sent', message: msg as Message });
+    // Built outside buildOutbound (its own registration session, §7.0), so
+    // record it here: keyed by the mandate ref, the way a resume looks it up.
+    this.deps.ledger.append(
+      'MESSAGE_OUT',
+      { ...asPayload(msg as Message), receiver: 'firewall' },
+      { session_id: msg.session_id, ref: this.deps.mandateRef },
+    );
     let res: PostResult;
     try {
       res = await this.deps.post(`${chain.firewallUrl.replace(/\/$/, '')}/acnp`, msg);
@@ -436,6 +443,139 @@ export class BuyerRunner {
       ...base,
       receipt,
     };
+  }
+
+  /**
+   * FEATURE-010 (drop candidate #1, built): pick up a run that ended
+   * `pending` — held for a human (COMPLIANCE_REVIEW + verdict escalate) or
+   * waiting for a receipt (SETTLING) — and poll again from where it
+   * stopped. Nothing is re-sent: the cart is already with both parties and
+   * the firewall's verdict, once issued, stays retrievable (§7.9). The
+   * deal is reconstructed from this buyer's own ledger (the recorded
+   * cart_mandate envelope), not from memory.
+   */
+  async resume(sessionId: string): Promise<RunResult | { error: string; state?: string }> {
+    const { db, ledger } = this.deps;
+    const row = db.prepare('SELECT * FROM sessions WHERE session_id = ?').get(sessionId) as
+      | {
+          session_id: string;
+          state: string;
+          verdict: string | null;
+          cart_mandate_hash: string | null;
+          settlement_status: string | null;
+          mandate_ref: string;
+          buyer_model: string;
+          round: number;
+          mandate_registered: number;
+        }
+      | undefined;
+    if (!row) return { error: 'unknown session' };
+    const held = row.state === 'COMPLIANCE_REVIEW' && row.verdict === 'escalate';
+    const settling = row.state === 'SETTLING';
+    if ((!held && !settling) || !row.cart_mandate_hash) {
+      return { error: `nothing to resume in state ${row.state}`, state: row.state };
+    }
+    const hash = row.cart_mandate_hash;
+    const cartEntry = ledger
+      .list({ session_id: sessionId, entry_type: 'MESSAGE_OUT', limit: 10_000 })
+      .find((e) => e.payload['type'] === 'cart_mandate');
+    const cart = cartEntry
+      ? (cartEntry.payload as unknown as Message<'cart_mandate'>).body
+      : undefined;
+    const deal = cart
+      ? {
+          line_items: cart.line_items.map((li) => ({
+            item_id: li.item_id,
+            variant_id: li.variant_id,
+            quantity: li.quantity,
+            proposed_unit_price: li.unit_price,
+          })),
+          total: cart.total,
+        }
+      : undefined;
+    const registered = ledger
+      .list({ entry_type: 'MESSAGE_OUT', ref: row.mandate_ref, limit: 10 })
+      .map((e) => e.payload as unknown as Message)
+      .find((m) => m.type === 'mandate_register');
+    const mandate = registered
+      ? (registered.body as BodyOf<'mandate_register'>).intent_mandate
+      : undefined;
+    const transcript: TranscriptEntry[] = [];
+    const notes: string[] = [`resumed session in ${row.state}${held ? ' (held for a human)' : ''}`];
+    const decorate = (core: CoreResult): RunResult => ({
+      ...core,
+      mandate: {
+        goal: mandate?.goal ?? '(mandate text not in this ledger)',
+        budget_ceiling: mandate?.budget_ceiling ?? 0,
+        intent_mandate_ref: row.mandate_ref,
+      },
+      models: { buyer: row.buyer_model },
+      llm: { calls: 0, fallbacks: 0 },
+      keys: {
+        firewall: this.deps.chain.firewallPublicKey,
+        settlement: this.deps.chain.settlementPublicKey,
+      },
+    });
+    const base = { ...(deal ? { deal } : {}), cart_mandate_hash: hash };
+    let verdict: BodyOf<'firewall_verdict'> | undefined;
+    if (held) {
+      const decided = await this.pollVerdict(hash, transcript);
+      if (!decided) {
+        notes.push('still held — outcome pending again');
+        return decorate({
+          ...this.finish(sessionId, transcript, notes, 'pending', 'HELD_IN_REVIEW'),
+          ...base,
+        });
+      }
+      verdict = decided.body;
+      db.prepare('UPDATE sessions SET verdict = ? WHERE session_id = ?').run(
+        verdict.verdict,
+        sessionId,
+      );
+      if (verdict.verdict === 'block') {
+        this.setState(sessionId, 'BLOCKED');
+        notes.push(`verdict: BLOCK (${verdict.layer}) — ${verdict.reasons.join(', ')}`);
+        return decorate({
+          ...this.finish(sessionId, transcript, notes, 'blocked', verdict.reasons.join(',')),
+          ...base,
+          verdict,
+        });
+      }
+      notes.push(`verdict: ALLOW (${verdict.layer}) — polling the receipt`);
+      this.setState(sessionId, 'SETTLING');
+    }
+    const receipt = await this.pollReceipt(sessionId, hash, transcript, notes);
+    if (!receipt) {
+      db.prepare('UPDATE sessions SET settlement_status = ? WHERE session_id = ?').run(
+        'pending',
+        sessionId,
+      );
+      notes.push('no receipt within the polling window — outcome pending again');
+      return decorate({
+        ...this.finish(sessionId, transcript, notes, 'pending', 'RECEIPT_TIMEOUT'),
+        ...base,
+        ...(verdict ? { verdict } : {}),
+      });
+    }
+    db.prepare(
+      'UPDATE sessions SET settlement_status = ?, razorpay_order_id = ? WHERE session_id = ?',
+    ).run(receipt.status, receipt.razorpay_order_id, sessionId);
+    this.setState(sessionId, receipt.status === 'paid' ? 'SETTLED' : 'FAILED');
+    notes.push(
+      `receipt: ${receipt.status.toUpperCase()} — Razorpay order ${receipt.razorpay_order_id}`,
+    );
+    return decorate({
+      ...this.finish(
+        sessionId,
+        transcript,
+        notes,
+        receipt.status === 'paid' ? 'settled' : 'failed',
+        receipt.status === 'paid' ? undefined : 'SETTLEMENT_FAILED',
+      ),
+      ...base,
+      ...(verdict ? { verdict } : {}),
+      receipt,
+    });
   }
 
   /**

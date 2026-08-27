@@ -75,6 +75,8 @@ export interface Stack {
   ) => Promise<{ status: number; body: Record<string, unknown> }>;
   /** Poll the queue until one hold appears, then decide it (runs beside a run()). */
   decideWhenHeld: (decision: 'approve' | 'reject') => Promise<string>;
+  /** FEATURE-010: POST /control/resume/:session_id. */
+  resume: (sessionId: string) => Promise<{ status: number; result: RunResult }>;
   /** Operator API GET on a party (`/ledger?…`, `/ledger/verify`, `/sessions`), token injected. */
   api: (
     party: 'merchant' | 'buyer' | 'firewall' | 'settlement',
@@ -227,6 +229,14 @@ export async function makeStack(opts: StackOptions = {}): Promise<Stack> {
     razorpay,
     pending,
     review,
+    resume: async (sessionId) => {
+      const res = await buyer.inject({
+        method: 'POST',
+        url: `/control/resume/${sessionId}`,
+        headers: { 'x-control-token': TOKEN },
+      });
+      return { status: res.statusCode, result: res.json() as RunResult };
+    },
     api: async (party, path) => {
       const app = { merchant, buyer, firewall, settlement }[party];
       const res = await app.inject({

@@ -102,6 +102,33 @@ export function buildApp(opts: AppOptions = {}) {
     });
   });
 
+  /** FEATURE-010: pick a `pending` run back up (held for a human, or awaiting a receipt). */
+  app.post('/control/resume/:session_id', async (req, reply) => {
+    if (!controlToken) return reply.code(503).send({ error: 'CONTROL_TOKEN not configured' });
+    if (req.headers['x-control-token'] !== controlToken) {
+      return reply.code(401).send({ error: 'invalid control token' });
+    }
+    if (!source || !chain) return reply.code(503).send({ error: 'buyer not fully configured' });
+    const { session_id } = req.params as { session_id: string };
+    const mandate = source.mandate();
+    const runner = new BuyerRunner({
+      db,
+      mandate,
+      mandateRef: hashCanonical(mandate),
+      agentId: process.env['BUYER_AGENT_ID'] ?? 'buyer-demo',
+      post: opts.post ?? fetchPost,
+      chain,
+      log: app.log,
+      ledger,
+      ...(opts.now ? { now: opts.now } : {}),
+      clockSkewSec: Number(process.env['CLOCK_SKEW_SEC'] ?? 120),
+      llm,
+    });
+    const result = await runner.resume(session_id);
+    if ('error' in result) return reply.code(409).send(result);
+    return reply.code(200).send(result);
+  });
+
   app.post('/control/run', async (req, reply) => {
     if (!controlToken) {
       return reply

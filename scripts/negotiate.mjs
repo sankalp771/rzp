@@ -12,6 +12,7 @@
  *   node scripts/negotiate.mjs --target var_bookend      # the walk-away demo (strategy stops it)
  *   node scripts/negotiate.mjs --target var_relay_8ch    # layer 1 stops it (CATEGORY_BLOCKED)
  *   node scripts/negotiate.mjs --target var_corp_hamper  # layer 2 / a human stops it (semantic)
+ *   node scripts/negotiate.mjs --resume <session_id>     # pick a pending (held) run back up
  *
  * While the run is in flight the script watches the firewall's review queue
  * (FIREWALL_REVIEW_TOKEN) and prints a HOLD banner with the exact approve /
@@ -56,13 +57,15 @@ async function obtainRun() {
   if (!token) throw new Error('CONTROL_TOKEN not set (env or .env)');
   const base = (env.BUYER_URL_LOCAL ?? 'http://localhost:4002').replace(/\/$/, '');
   const target = flag('--target');
+  const resume = flag('--resume');
   const stop = { done: false };
   watchQueue(stop);
   try {
-    const res = await fetch(`${base}/control/run`, {
+    // --resume <session_id>: pick a pending run back up (held / awaiting receipt).
+    const res = await fetch(resume ? `${base}/control/resume/${resume}` : `${base}/control/run`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-control-token': token },
-      body: JSON.stringify(target ? { target_variant_id: target } : {}),
+      body: JSON.stringify(target && !resume ? { target_variant_id: target } : {}),
       // A held run waits VERDICT_POLL_TIMEOUT_MS (2 min) + receipt polling.
       signal: AbortSignal.timeout(10 * 60 * 1000),
     });

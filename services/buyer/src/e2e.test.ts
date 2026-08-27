@@ -430,6 +430,25 @@ describe('E2E: layer 2 + the human queue (F3 escalate, Gate 3 items 2–4)', () 
       verdict: 'allow',
       layer: 'human',
     });
+
+    // FEATURE-010: the pending run is picked back up — nothing re-sent — and settles.
+    const resumed = await stack.resume(result.session_id);
+    expect(resumed.status).toBe(200);
+    expect(resumed.result.outcome).toBe('settled');
+    expect(resumed.result.state).toBe('SETTLED');
+    expect(resumed.result.verdict).toMatchObject({ verdict: 'allow', layer: 'human' });
+    expect(resumed.result.receipt).toMatchObject({ status: 'paid' });
+    expect(resumed.result.deal?.line_items[0]?.item_id).toBe('itm_vase'); // reconstructed from the ledger
+    expect(resumed.result.mandate.goal).toMatch(/Anniversary gift/);
+    expect(types(resumed.result)).toEqual(['r:firewall_verdict', 'r:settlement_receipt']);
+    expect(
+      stack.buyerDb
+        .prepare('SELECT state FROM sessions WHERE session_id = ?')
+        .get(result.session_id),
+    ).toEqual({ state: 'SETTLED' });
+    // Resuming a finished session is refused, not re-run.
+    expect((await stack.resume(result.session_id)).status).toBe(409);
+    expect((await stack.api('buyer', '/ledger/verify')).body).toMatchObject({ ok: true });
     await stack.close();
   });
 });
