@@ -11,10 +11,13 @@ import {
   type BodyOf,
   type ErrorCode,
   type IntentMandate,
+  type JsonValue,
   type Message,
 } from '@negotiator/protocol';
+import { Ledger } from '@negotiator/ledger';
 import { openDb, nextStreamSeq, SqliteReplayStore, type FirewallDb } from './db.js';
 import { verifierFromEnv, type Verifier } from './intent.js';
+import { ledgerRoutes } from './ledger-routes.js';
 import { DEFAULT_POLICY, evaluateLayer1, policyFromEnv, type PolicyConfig } from './policy.js';
 import {
   applyVerdict,
@@ -95,6 +98,8 @@ export interface AppOptions {
   escalationTimeoutSec?: number;
   /** Timer period for the timeout sweep; 0 disables the timer (tests sweep lazily). */
   sweepIntervalMs?: number;
+  /** Operator read API secret (ledger, sessions); defaults to DASHBOARD_TOKEN. */
+  dashboardToken?: string;
 }
 
 interface MandateRow {
@@ -172,6 +177,11 @@ export function buildApp(opts: AppOptions = {}) {
     opts.escalationTimeoutSec ?? Number(env['FIREWALL_ESCALATION_TIMEOUT_SEC'] ?? 600);
   const sweepIntervalMs =
     opts.sweepIntervalMs ?? Number(env['FIREWALL_ESCALATION_SWEEP_MS'] ?? 15_000);
+  const dashboardToken = opts.dashboardToken ?? env['DASHBOARD_TOKEN'];
+  // The firewall's own audit chain (D023): every message, verdict and decision.
+  const ledger = new Ledger(db, now);
+  const asPayload = (m: Message): Record<string, JsonValue> =>
+    m as unknown as Record<string, JsonValue>;
 
   // Long-lived signing key (§5): ephemeral with a loud warning if unset —
   // nobody can verify our verdicts then, which /health makes visible.
@@ -333,6 +343,26 @@ export function buildApp(opts: AppOptions = {}) {
       now().toISOString(),
       verifierJson,
     );
+    // Two entries: the decision (with the human-readable details and the
+    // verifier attribution the wire never carries) and the signed envelope.
+    ledger.append(
+      'VERDICT',
+      {
+        cart_mandate_hash: hash,
+        seq: (prev?.seq ?? 0) + 1,
+        verdict: applied.verdict,
+        layer: applied.layer,
+        reasons: applied.reasons,
+        details: applied.details,
+        verifier: verifierJson ? (JSON.parse(verifierJson) as JsonValue) : null,
+      },
+      { session_id: sessionId, ref: hash },
+    );
+    ledger.append(
+      'MESSAGE_OUT',
+      { ...asPayload(verdict), receiver: 'buyer' },
+      { session_id: sessionId, ref: hash },
+    );
     return verdict;
   }
 
@@ -382,17 +412,62 @@ export function buildApp(opts: AppOptions = {}) {
     merchant_url: merchantUrl,
     dispatch_timeout_ms: dispatchTimeoutMs,
     notify_timeout_ms: notifyTimeoutMs,
+    ledger_entries: ledger.count(),
+    operator_api: dashboardToken ? 'enabled' : 'disabled (DASHBOARD_TOKEN unset)',
   }));
+
+  // Operator API (D024): this firewall's ledger and sessions, read-only.
+  const dashGate = ledgerRoutes(app, ledger, dashboardToken);
+  app.get('/sessions', async (req, reply) => {
+    const denied = dashGate(req);
+    if (denied) return reply.code(denied.status).send({ error: denied.error });
+    return reply.code(200).send({
+      sessions: db
+        .prepare(
+          `SELECT s.session_id, s.intent_mandate_ref, s.cart_mandate_hash, s.state, s.created_at,
+                  c.principal_id, c.seller_agent_id, c.total, c.settlement_dispatched, c.seller_notified
+             FROM sessions s JOIN carts c ON c.cart_mandate_hash = s.cart_mandate_hash
+            ORDER BY s.rowid DESC LIMIT 200`,
+        )
+        .all(),
+    });
+  });
 
   app.post('/acnp', async (req, reply) => {
     const result = receive(req.body);
     if (!result.ok) {
       app.log.warn({ code: result.code, detail: result.detail }, 'boundary rejection');
-      return reply.code(200).send(errorMessage(req.body, result.code, result.detail));
+      const err = errorMessage(req.body, result.code, result.detail);
+      // F5/F6: on record without trusting anything in the rejected message.
+      ledger.append('BOUNDARY_REJECTED', {
+        code: result.code,
+        detail: result.detail,
+        claimed_session_id: err.session_id,
+        reply: asPayload(err),
+      });
+      return reply.code(200).send(err);
     }
     const msg = result.message;
+    ledger.append('MESSAGE_IN', asPayload(msg), { session_id: msg.session_id });
     const done = (out: Message | null) => {
       result.commit(); // authenticated: consumes seq even when rejected (§6)
+      if (out !== null && out.type === 'error') {
+        ledger.append(
+          'HANDLER_REJECTED',
+          { code: (out.body as BodyOf<'error'>).code, reply: asPayload(out) },
+          { session_id: msg.session_id },
+        );
+      } else if (out !== null && out.type !== 'firewall_verdict') {
+        // Verdicts are recorded where they are issued (appendVerdict), since
+        // the human path issues them outside this route.
+        ledger.append(
+          'MESSAGE_OUT',
+          { ...asPayload(out), receiver: 'buyer' },
+          {
+            session_id: msg.session_id,
+          },
+        );
+      }
       return out === null ? reply.code(204).send() : reply.code(200).send(out);
     };
     switch (msg.type) {
@@ -555,6 +630,23 @@ export function buildApp(opts: AppOptions = {}) {
       db.prepare('UPDATE sessions SET state = ? WHERE session_id = ?').run(
         stateFor(applied.verdict),
         cart.session_id,
+      );
+      ledger.append(
+        'SESSION_STATE',
+        { state: stateFor(applied.verdict) },
+        { session_id: cart.session_id, ref: hash },
+      );
+      ledger.append(
+        decision === 'timeout' ? 'ESCALATION_TIMEOUT' : 'ESCALATION_DECIDED',
+        {
+          decision,
+          reviewer,
+          note,
+          verdict: applied.verdict,
+          layer: applied.layer,
+          reasons: applied.reasons,
+        },
+        { session_id: cart.session_id, ref: hash },
       );
       return { verdict, applied, cartMsg, row };
     })();
@@ -727,6 +819,11 @@ export function buildApp(opts: AppOptions = {}) {
           { mandate_hash, event: 'VERIFIER_ABSENT', reason: layer2.reason, record: layer2.record },
           'intent-verifier absent — escalating, never allowing',
         );
+        ledger.append(
+          'VERIFIER_ABSENT',
+          { reason: layer2.reason, record: layer2.record as unknown as JsonValue },
+          { session_id: msg.session_id, ref: mandate_hash },
+        );
       }
     }
     const applied = applyVerdict(layer1, layer2);
@@ -750,6 +847,11 @@ export function buildApp(opts: AppOptions = {}) {
         `INSERT INTO sessions (session_id, intent_mandate_ref, cart_mandate_hash, state, created_at)
          VALUES (?, ?, ?, ?, ?)`,
       ).run(msg.session_id, body.intent_mandate_ref, mandate_hash, stateFor(applied.verdict), ts);
+      ledger.append(
+        'SESSION_STATE',
+        { state: stateFor(applied.verdict) },
+        { session_id: msg.session_id, ref: mandate_hash },
+      );
       const v = appendVerdict(msg.session_id, mandate_hash, applied, verifierJson, msg.message_id);
       if (applied.verdict === 'escalate') {
         db.prepare(
@@ -816,6 +918,16 @@ export function buildApp(opts: AppOptions = {}) {
     db.prepare(
       'UPDATE carts SET settlement_dispatched = ?, settlement_error = ? WHERE cart_mandate_hash = ?',
     ).run(outcome.ok ? 1 : 0, outcome.ok ? null : outcome.error, mandateHash);
+    // One entry says what was sent AND whether settlement accepted it.
+    ledger.append(
+      'MESSAGE_OUT',
+      {
+        ...asPayload(request),
+        receiver: 'settlement',
+        delivery: outcome.ok ? 'accepted' : `failed: ${outcome.error}`,
+      },
+      { session_id: cart.session_id, ref: mandateHash },
+    );
     if (outcome.ok) {
       app.log.info({ mandate_hash: mandateHash }, 'settlement_request accepted by settlement');
     } else {
@@ -843,6 +955,15 @@ export function buildApp(opts: AppOptions = {}) {
     db.prepare(
       'UPDATE carts SET seller_notified = ?, seller_error = ? WHERE cart_mandate_hash = ?',
     ).run(outcome.ok ? 1 : 0, outcome.ok ? null : outcome.error, mandateHash);
+    ledger.append(
+      'MESSAGE_OUT',
+      {
+        ...asPayload(forSeller),
+        receiver: 'seller',
+        delivery: outcome.ok ? 'accepted' : `failed: ${outcome.error}`,
+      },
+      { session_id: sessionId, ref: mandateHash },
+    );
     if (!outcome.ok) {
       app.log.warn({ mandate_hash: mandateHash, error: outcome.error }, 'seller not notified');
     }

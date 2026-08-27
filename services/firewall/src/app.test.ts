@@ -57,6 +57,7 @@ const HAMPER: CatalogSnapshot = {
 };
 
 const REVIEW_TOKEN = 'review-secret';
+const DASHBOARD_TOKEN = 'dash-secret';
 const script = (recommendation: string, reasons: string[], summary = 'because') =>
   JSON.stringify({ recommendation, reasons, summary });
 const verifierSaying = (text: string) => makeVerifier(new StubLlmAdapter(text));
@@ -192,7 +193,16 @@ function stack(o: StackOpts = {}) {
     ...(o.reviewToken === null ? {} : { reviewToken: o.reviewToken ?? REVIEW_TOKEN }),
     escalationTimeoutSec: o.escalationTimeoutSec ?? 600,
     sweepIntervalMs: 0,
+    dashboardToken: DASHBOARD_TOKEN,
   });
+  const ledgerGet = async (path: string) => {
+    const res = await app.inject({
+      method: 'GET',
+      url: path,
+      headers: { 'x-dashboard-token': DASHBOARD_TOKEN },
+    });
+    return { status: res.statusCode, body: res.json() as Record<string, unknown> };
+  };
   apps.push(app, settlement);
   const send = async (m: unknown) => {
     const res = await app.inject({ method: 'POST', url: '/acnp', payload: wire(m) });
@@ -251,6 +261,7 @@ function stack(o: StackOpts = {}) {
     queue,
     poll,
     verdictCount,
+    ledgerGet,
   };
 }
 
@@ -871,5 +882,91 @@ describe(`${SERVICE_NAME} — layer 2 + the human queue (D021/D022)`, () => {
     expect(verdictOf((await s.send(resent)).body).verdict).toBe('escalate');
     expect((await s.queue()).body.pending).toHaveLength(1);
     expect(s.verdictCount(hash)).toBe(1);
+  });
+});
+
+/** FEATURE-010 Gate 5 over HTTP: the firewall's chain tells the whole F3 story and verifies. */
+describe(`${SERVICE_NAME} — audit ledger (F6, D023)`, () => {
+  it('escalate → approve is fully on record: message in, verifier, verdicts, decision, dispatch outcome; chain verifies', async () => {
+    const s = stack({ verifier: verifierSaying(script('escalate', ['INTENT_DRIFT_QUANTITY'])) });
+    const buyer = new Buyer(makeIntentMandate(principal));
+    await s.send(buyer.register());
+    const cart = buyer.cart(randomUUID(), { snapshot: HAMPER, unit: 400_000 });
+    const hash = cart.body.mandate_hash;
+    await s.send(cart);
+    expect((await s.review(hash, { decision: 'approve', reviewer: 'sankalp' })).status).toBe(200);
+    await s.settlement.engine.drain();
+
+    type E = { entry_type: string; payload: Record<string, unknown>; ref: string | null };
+    const entries = (await s.ledgerGet(`/ledger?session_id=${cart.session_id}`)).body[
+      'entries'
+    ] as E[];
+    const shape = entries.map(
+      (e) =>
+        `${e.entry_type}${e.payload['type'] ? `:${e.payload['type']}` : ''}${e.payload['receiver'] ? `→${e.payload['receiver']}` : ''}${e.payload['verdict'] && !e.payload['type'] ? `:${e.payload['verdict']}` : ''}${e.payload['state'] ? `:${e.payload['state']}` : ''}`,
+    );
+    expect(shape).toEqual([
+      'MESSAGE_IN:cart_mandate',
+      'SESSION_STATE:COMPLIANCE_REVIEW',
+      'VERDICT:escalate',
+      'MESSAGE_OUT:firewall_verdict→buyer',
+      'MESSAGE_OUT:firewall_verdict→seller',
+      'VERDICT:allow',
+      'MESSAGE_OUT:firewall_verdict→buyer',
+      'SESSION_STATE:SETTLING',
+      'ESCALATION_DECIDED:allow',
+      'MESSAGE_OUT:settlement_request→settlement',
+      'MESSAGE_OUT:firewall_verdict→seller',
+    ]);
+    const dispatch = entries.find((e) => e.payload['type'] === 'settlement_request')!;
+    expect(dispatch.payload['delivery']).toBe('accepted');
+    // Everything the firewall DID about this cart is keyed by its hash (the
+    // inbound message itself is keyed by session only — its hash is unverified
+    // until the handler recomputes it).
+    expect(entries.filter((e) => e.entry_type !== 'MESSAGE_IN').every((e) => e.ref === hash)).toBe(
+      true,
+    );
+    // The registration is on its own session; the boundary rejection has no session.
+    const all = (await s.ledgerGet('/ledger')).body['entries'] as E[];
+    expect(all.filter((e) => e.payload['type'] === 'mandate_register')).toHaveLength(1);
+    expect(all.filter((e) => e.payload['type'] === 'mandate_ack')).toHaveLength(1);
+    expect((await s.ledgerGet('/ledger/verify')).body).toMatchObject({
+      ok: true,
+      length: all.length,
+    });
+    expect((await s.ledgerGet('/sessions')).body['sessions']).toHaveLength(1);
+  });
+
+  it('a boundary rejection and a verifier absence are entries; an out-of-band edit breaks verification at that entry', async () => {
+    const down: Verifier = {
+      provider: 'x',
+      modelId: 'x',
+      verify: async () => ({
+        kind: 'absent',
+        reason: 'timeout',
+        record: { model_id: 'x', used_llm: false, latency_ms: 1 },
+      }),
+    };
+    const s = stack({ verifier: down });
+    const buyer = new Buyer(makeIntentMandate(principal));
+    expectError((await s.send(buyer.cart(randomUUID()))).body, 'MANDATE_UNKNOWN');
+    await s.send(buyer.register());
+    await s.send(buyer.cart(randomUUID()));
+    type E = { entry_seq: number; entry_type: string; session_id: string | null };
+    const all = (await s.ledgerGet('/ledger')).body['entries'] as E[];
+    expect(all[0]).toMatchObject({ entry_type: 'BOUNDARY_REJECTED', session_id: null });
+    expect(all.some((e) => e.entry_type === 'VERIFIER_ABSENT')).toBe(true);
+    const k = all.find((e) => e.entry_type === 'VERIFIER_ABSENT')!.entry_seq;
+    s.db
+      .prepare(
+        `UPDATE ledger_entries SET payload_json = '{"reason":"fine"}' WHERE entry_seq = ${k}`,
+      )
+      .run();
+    expect((await s.ledgerGet('/ledger/verify')).body).toMatchObject({
+      ok: false,
+      break_at_seq: k,
+      reason: 'entry_hash_mismatch',
+    });
+    expect((await s.app.inject({ method: 'GET', url: '/ledger' })).statusCode).toBe(401);
   });
 });

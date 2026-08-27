@@ -90,6 +90,9 @@ importers:
 
   services/firewall:
     dependencies:
+      '@negotiator/ledger':
+        specifier: workspace:*
+        version: link:../../packages/ledger
       '@negotiator/llm':
         specifier: workspace:*
         version: link:../../packages/llm
@@ -143,6 +146,9 @@ importers:
 
   services/settlement:
     dependencies:
+      '@negotiator/ledger':
+        specifier: workspace:*
+        version: link:../../packages/ledger
       '@negotiator/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
