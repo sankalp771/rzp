@@ -113,6 +113,17 @@ describe('ledger chain (PROTOCOL §11, Gate 5)', () => {
     expect(ledger.count()).toBe(5);
   });
 
+  it('a read-only copy can be verified: opening an existing ledger never writes', () => {
+    const { db } = seeded();
+    // Simulate the auditor: same file, opened read-only (in-memory stand-in:
+    // a second Ledger over the same db after a readonly pragma would still
+    // work because migrate is skipped when the table exists).
+    db.pragma('query_only = ON');
+    const auditor = new Ledger(db, NOW);
+    expect(auditor.verify()).toMatchObject({ ok: true, length: 5 });
+    expect(() => auditor.append('LLM_MOVE', {}, {})).toThrow(); // read-only stays read-only
+  });
+
   it('every entry type is spelled once', () => {
     expect(new Set(ENTRY_TYPES).size).toBe(ENTRY_TYPES.length);
   });

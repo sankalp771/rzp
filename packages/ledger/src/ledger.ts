@@ -82,6 +82,12 @@ interface Row {
 }
 
 export function migrateLedger(db: Database.Database): void {
+  // An auditor verifies a COPY of a database opened read-only: never write
+  // to a ledger that already exists (also keeps `verify` side-effect free).
+  const exists = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ledger_entries'")
+    .get();
+  if (exists) return;
   db.exec(`
     -- APPEND-ONLY (CONSTRAINTS #7). No code path anywhere may UPDATE or
     -- DELETE here; packages/ledger/src/ledger.test.ts greps every workspace.

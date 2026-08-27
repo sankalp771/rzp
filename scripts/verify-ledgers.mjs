@@ -6,6 +6,8 @@
  *   node scripts/verify-ledgers.mjs                 # verify all four live ledgers; cross-check the latest session
  *   node scripts/verify-ledgers.mjs --session <id>  # cross-check that session
  *   node scripts/verify-ledgers.mjs --db path.db    # verify a COPY of a service database offline
+ *     (the services run SQLite in WAL mode: copy `x.db` AND `x.db-wal`, e.g.
+ *      docker compose cp firewall:/app/data/firewall.db . && docker compose cp firewall:/app/data/firewall.db-wal .)
  *
  * Whole-ledger verification per party (a session slice is never a chain of
  * its own) + cross-party check: every signed envelope one party sent that
