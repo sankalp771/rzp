@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LlmError, type LlmAdapter } from '@negotiator/llm';
+import { LlmError, createAdapterFromEnv, type LlmAdapter } from '@negotiator/llm';
 import type { CartMandateBody, IntentMandate } from '@negotiator/protocol';
 import { LAYER2_REASONS, type Layer2Outcome, type Layer2Reason } from './verdict.js';
 
@@ -164,4 +164,55 @@ export async function verifyIntent(
     ...parsed.value,
     record: { model_id: adapter.modelId, used_llm: true, latency_ms },
   };
+}
+
+/**
+ * The seam app.ts depends on — a verifier is "something that answers the
+ * question", not an LLM adapter, so app.ts stays free of the LLM package
+ * (Gate 3 item 5). Tests hand in a scripted adapter through `makeVerifier`.
+ */
+export interface Verifier {
+  readonly provider: string;
+  readonly modelId: string;
+  verify(mandate: IntentMandate, cart: CartMandateBody): Promise<Layer2Outcome>;
+}
+
+export function makeVerifier(adapter: LlmAdapter, now?: () => number): Verifier {
+  return {
+    provider: adapter.provider,
+    modelId: adapter.modelId,
+    verify: (mandate, cart) => verifyIntent(adapter, mandate, cart, now),
+  };
+}
+
+/** Default: the firewall's own share of the buyer's 30 s window (FEATURE-009 inequality). */
+export const DEFAULT_FIREWALL_LLM_BUDGET_MS = 8_000;
+
+/**
+ * FIREWALL_LLM_PROVIDER unset or "stub" → `not_configured`: layer 1 only,
+ * loudly visible in /health and as `layer: policy` on every verdict. There
+ * is deliberately NO stub verifier in production: one that allowed
+ * everything would be a fake auditor, one that answered nothing would
+ * escalate every key-less quickstart run. A named provider with a missing
+ * key refuses to boot (D015, no silent downgrade).
+ */
+export function verifierFromEnv(
+  env: Record<string, string | undefined>,
+  now?: () => number,
+): Verifier | 'not_configured' {
+  const provider = (env['FIREWALL_LLM_PROVIDER'] ?? 'stub').toLowerCase();
+  if (provider === 'stub') return 'not_configured';
+  const budgetMs = env['FIREWALL_LLM_BUDGET_MS'] ?? String(DEFAULT_FIREWALL_LLM_BUDGET_MS);
+  // The verifier runs inside the buyer's HTTP call alongside dispatch and
+  // notify, so it gets its own, smaller total budget than the agents' 12 s:
+  //   BUYER_HTTP_TIMEOUT_MS (30 000) > FIREWALL_LLM_BUDGET_MS (8 000)
+  //     + FIREWALL_DISPATCH_TIMEOUT_MS (8 000) + FIREWALL_NOTIFY_TIMEOUT_MS (5 000) + processing
+  const adapter = createAdapterFromEnv('FIREWALL', {
+    env: {
+      ...env,
+      LLM_TOTAL_BUDGET_MS: budgetMs,
+      LLM_CALL_TIMEOUT_MS: env['FIREWALL_LLM_CALL_TIMEOUT_MS'] ?? budgetMs,
+    },
+  });
+  return makeVerifier(adapter, now);
 }

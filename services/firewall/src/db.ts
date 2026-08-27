@@ -72,7 +72,23 @@ function migrate(db: FirewallDb): void {
       details_json      TEXT NOT NULL,         -- human-readable per reason (logs/dashboard)
       verdict_json      TEXT NOT NULL,         -- signed firewall_verdict envelope
       issued_at         TEXT NOT NULL,
+      verifier_json     TEXT,                  -- layer-2 attribution: model, latency, raw recommendation / absence
       PRIMARY KEY (cart_mandate_hash, seq)
+    );
+    -- The human approval queue (FEATURE-009, §7.9). A row is DECIDED EXACTLY
+    -- ONCE: the claim is "UPDATE ... WHERE status = 'pending'" inside the
+    -- same transaction that appends the human verdict, so a human decision
+    -- and the timeout sweep can never both produce one (amendment #1).
+    CREATE TABLE IF NOT EXISTS escalations (
+      cart_mandate_hash TEXT PRIMARY KEY,
+      session_id        TEXT NOT NULL,
+      held_since        TEXT NOT NULL,
+      expires_at        TEXT NOT NULL,
+      status            TEXT NOT NULL DEFAULT 'pending', -- pending | decided
+      decision          TEXT,                            -- approve | reject | timeout
+      reviewer          TEXT,
+      note              TEXT,
+      decided_at        TEXT
     );
     -- Outbound seq per (session, receiver) — PROTOCOL.md §6 streams.
     CREATE TABLE IF NOT EXISTS streams (
@@ -94,6 +110,12 @@ function migrate(db: FirewallDb): void {
       PRIMARY KEY (session_id, message_id)
     );
   `);
+  // Day 8 volumes predate layer 2; adding a nullable column is not an edit
+  // of any existing verdict row (CONSTRAINTS #7).
+  const cols = db.prepare('PRAGMA table_info(verdicts)').all() as { name: string }[];
+  if (!cols.some((c) => c.name === 'verifier_json')) {
+    db.exec('ALTER TABLE verdicts ADD COLUMN verifier_json TEXT');
+  }
 }
 
 /** Next outbound seq on the (session, receiver) stream — §6. */

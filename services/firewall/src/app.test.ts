@@ -13,8 +13,10 @@ import { buildMessage, makeIntentMandate, makePrincipal } from '@negotiator/prot
 import { buildApp as buildSettlementApp } from '../../settlement/src/app.js';
 import { openDb as openSettlementDb } from '../../settlement/src/db.js';
 import { SimulatedRazorpayClient } from '../../settlement/src/razorpay.js';
+import { StubLlmAdapter } from '@negotiator/llm';
 import { buildApp, SERVICE_NAME, type PostFn } from './app.js';
 import { openDb } from './db.js';
+import { makeVerifier, type Verifier } from './intent.js';
 import { DEFAULT_POLICY } from './policy.js';
 
 /**
@@ -45,6 +47,19 @@ const RAM: CatalogSnapshot = {
   category: 'industrial',
   variants: [{ variant_id: 'var_ram_64', attributes: {}, list_price: 1_850_000, stock: 40 }],
 };
+/** Every layer-1 number passes; only semantics can stop it (FEATURE-009 flagship). */
+const HAMPER: CatalogSnapshot = {
+  item_id: 'itm_corp_hamper',
+  title: 'Corporate gifting hamper',
+  description: 'Pack of 12 logo-branded desk calendars for client distribution.',
+  category: 'gifts',
+  variants: [{ variant_id: 'var_corp_hamper', attributes: {}, list_price: 480_000, stock: 9 }],
+};
+
+const REVIEW_TOKEN = 'review-secret';
+const script = (recommendation: string, reasons: string[], summary = 'because') =>
+  JSON.stringify({ recommendation, reasons, summary });
+const verifierSaying = (text: string) => makeVerifier(new StubLlmAdapter(text));
 
 /** One buyer identity: a session key, its registration, and stream counters. */
 class Buyer {
@@ -127,13 +142,18 @@ interface StackOpts {
   /** Replace the seller leg (failure injection). */
   sellerPost?: PostFn;
   dispatchTimeoutMs?: number;
+  verifier?: Verifier;
+  reviewToken?: string | null;
+  escalationTimeoutSec?: number;
+  now?: () => Date;
 }
 
 function stack(o: StackOpts = {}) {
+  const now = o.now ?? NOW;
   const razorpay = new SimulatedRazorpayClient();
   const settlement = buildSettlementApp({
     db: openSettlementDb(':memory:'),
-    now: NOW,
+    now,
     razorpay,
     signingKey: settlementKey,
     firewallPublicKey: firewallKey.publicKey,
@@ -159,7 +179,7 @@ function stack(o: StackOpts = {}) {
   const db = openDb(':memory:');
   const app = buildApp({
     db,
-    now: NOW,
+    now,
     signingKey: firewallKey,
     principalKeys: o.principalKeys ?? [principal.publicKey],
     policy: { ...DEFAULT_POLICY, ...o.policy },
@@ -168,6 +188,10 @@ function stack(o: StackOpts = {}) {
     post,
     dispatchTimeoutMs: o.dispatchTimeoutMs ?? 1000,
     notifyTimeoutMs: 1000,
+    verifier: o.verifier ?? 'not_configured',
+    ...(o.reviewToken === null ? {} : { reviewToken: o.reviewToken ?? REVIEW_TOKEN }),
+    escalationTimeoutSec: o.escalationTimeoutSec ?? 600,
+    sweepIntervalMs: 0,
   });
   apps.push(app, settlement);
   const send = async (m: unknown) => {
@@ -177,6 +201,35 @@ function stack(o: StackOpts = {}) {
       body: res.statusCode === 204 ? null : (res.json() as Message),
     };
   };
+  const review = async (
+    hash: string,
+    body: Record<string, unknown>,
+    token: string | null = REVIEW_TOKEN,
+  ) => {
+    const res = await app.inject({
+      method: 'POST',
+      url: `/review/${hash}`,
+      payload: body,
+      ...(token ? { headers: { 'x-review-token': token } } : {}),
+    });
+    return { status: res.statusCode, body: res.json() as Record<string, unknown> };
+  };
+  const queue = async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/review',
+      headers: { 'x-review-token': REVIEW_TOKEN },
+    });
+    return { status: res.statusCode, body: res.json() as { pending: Record<string, unknown>[] } };
+  };
+  const poll = async (hash: string) =>
+    (await app.inject({ method: 'GET', url: `/verdict/${hash}` })).json() as Message;
+  const verdictCount = (hash: string) =>
+    (
+      db.prepare('SELECT COUNT(*) AS n FROM verdicts WHERE cart_mandate_hash = ?').get(hash) as {
+        n: number;
+      }
+    ).n;
   const cartRow = (hash: string) =>
     db.prepare('SELECT * FROM carts WHERE cart_mandate_hash = ?').get(hash) as
       | {
@@ -186,7 +239,19 @@ function stack(o: StackOpts = {}) {
           seller_error: string | null;
         }
       | undefined;
-  return { app, db, settlement, razorpay, sellerInbox, send, cartRow };
+  return {
+    app,
+    db,
+    settlement,
+    razorpay,
+    sellerInbox,
+    send,
+    cartRow,
+    review,
+    queue,
+    poll,
+    verdictCount,
+  };
 }
 
 const wire = (m: unknown) => JSON.parse(JSON.stringify(m));
@@ -253,7 +318,7 @@ describe(`${SERVICE_NAME} — mandate_register (§7.0, D010)`, () => {
     );
     expect((await bare.app.inject({ method: 'GET', url: '/health' })).json()).toMatchObject({
       principal_keys: 0,
-      intent_verifier: 'not_configured (Day 9)',
+      intent_verifier: 'not_configured',
     });
   });
 });
@@ -512,5 +577,299 @@ describe(`${SERVICE_NAME} — dispatch failure branch (amendment #4)`, () => {
       seller_notified: 0,
       seller_error: 'merchant down',
     });
+  });
+});
+
+/**
+ * FEATURE-009 Gate 3 items 2–5 over HTTP: layer 2 recommends, the applier
+ * narrows, the human queue decides exactly once. The verifier is a
+ * scripted stub — what matters here is what the FIREWALL does with each
+ * kind of answer, not what a model would say.
+ */
+describe(`${SERVICE_NAME} — layer 2 + the human queue (D021/D022)`, () => {
+  async function held(o: StackOpts = {}) {
+    const s = stack({
+      verifier: verifierSaying(script('escalate', ['INTENT_DRIFT_QUANTITY'])),
+      ...o,
+    });
+    const buyer = new Buyer(makeIntentMandate(principal));
+    await s.send(buyer.register());
+    const cart = buyer.cart(randomUUID(), { snapshot: HAMPER, unit: 400_000 });
+    const v = verdictOf((await s.send(cart)).body);
+    expect(v).toMatchObject({ verdict: 'escalate', layer: 'intent_verifier' });
+    return { s, buyer, cart, hash: cart.body.mandate_hash };
+  }
+
+  it('clean allow recommendation → allow, layer intent_verifier, summary on the wire, attribution stored, order paid', async () => {
+    const s = stack({
+      verifier: verifierSaying(script('allow', [], 'a thoughtful handmade gift')),
+    });
+    const buyer = new Buyer(makeIntentMandate(principal));
+    await s.send(buyer.register());
+    const cart = buyer.cart(randomUUID());
+    const v = verdictOf((await s.send(cart)).body);
+    expect(v).toEqual({
+      cart_mandate_hash: cart.body.mandate_hash,
+      verdict: 'allow',
+      layer: 'intent_verifier',
+      reasons: [],
+      verifier_summary: 'a thoughtful handmade gift',
+    });
+    const row = s.db
+      .prepare('SELECT verifier_json FROM verdicts WHERE cart_mandate_hash = ?')
+      .get(cart.body.mandate_hash) as { verifier_json: string };
+    expect(JSON.parse(row.verifier_json)).toMatchObject({
+      kind: 'recommendation',
+      recommendation: 'allow',
+      record: { model_id: 'stub/deterministic', used_llm: true },
+    });
+    await s.settlement.engine.drain();
+    expect(s.settlement.engine.row(cart.body.mandate_hash)?.status).toBe('paid');
+    expect((await s.app.inject({ method: 'GET', url: '/health' })).json()).toMatchObject({
+      intent_verifier: { provider: 'stub', model: 'stub/deterministic' },
+      review: 'enabled',
+      pending_escalations: 0,
+    });
+  });
+
+  it('FLAGSHIP (semantic): every layer-1 number passes, verifier says block → block, reasons on the wire, nothing to settlement', async () => {
+    // First audit (the hamper) → block; the follow-up compliant cart → allow.
+    const s = stack({
+      verifier: makeVerifier(
+        new StubLlmAdapter((_req, call) =>
+          call === 1
+            ? script('block', ['INTENT_DRIFT_QUANTITY', 'INTENT_DRIFT_CATEGORY'], 'B2B bulk lot')
+            : script('allow', []),
+        ),
+      ),
+    });
+    const buyer = new Buyer(makeIntentMandate(principal));
+    await s.send(buyer.register());
+    const cart = buyer.cart(randomUUID(), { snapshot: HAMPER, unit: 400_000 });
+    const v = verdictOf((await s.send(cart)).body);
+    expect(v).toMatchObject({
+      verdict: 'block',
+      layer: 'intent_verifier',
+      reasons: ['INTENT_DRIFT_QUANTITY', 'INTENT_DRIFT_CATEGORY'],
+      verifier_summary: 'B2B bulk lot',
+    });
+    await s.settlement.engine.drain();
+    expect(s.razorpay.createCalls).toBe(0);
+    expect(s.sellerInbox[0]!.body).toMatchObject({ verdict: 'block' });
+    expect((await s.queue()).body.pending).toEqual([]);
+    // A layer-2 block does not consume the mandate: a compliant cart can follow.
+    expect(verdictOf((await s.send(buyer.cart(randomUUID()))).body).verdict).toBe('allow');
+  });
+
+  it('benign cart passes WITHOUT escalation under a sane verifier (false-block guard, Gate 3 item 3)', async () => {
+    const s = stack({ verifier: verifierSaying(script('allow', [])) });
+    const buyer = new Buyer(makeIntentMandate(principal));
+    await s.send(buyer.register());
+    expect(verdictOf((await s.send(buyer.cart(randomUUID()))).body).verdict).toBe('allow');
+    expect((await s.queue()).body.pending).toEqual([]);
+  });
+
+  it('verifier never consulted when layer 1 blocks', async () => {
+    let calls = 0;
+    const counting: Verifier = {
+      provider: 'spy',
+      modelId: 'spy',
+      verify: async () => {
+        calls += 1;
+        return {
+          kind: 'absent',
+          reason: 'x',
+          record: { model_id: 'spy', used_llm: false, latency_ms: 0 },
+        };
+      },
+    };
+    const s = stack({ verifier: counting });
+    const buyer = new Buyer(makeIntentMandate(principal));
+    await s.send(buyer.register());
+    const v = verdictOf(
+      (await s.send(buyer.cart(randomUUID(), { snapshot: RAM, unit: 450_000 }))).body,
+    );
+    expect(v).toMatchObject({ verdict: 'block', layer: 'policy', reasons: ['CATEGORY_BLOCKED'] });
+    expect(calls).toBe(0);
+  });
+
+  it('verifier DOWN (throws) → escalate, never allow; hold visible in /health and /review; the ref is in review', async () => {
+    const down: Verifier = {
+      provider: 'gemini',
+      modelId: 'gemini/x',
+      verify: async () => ({
+        kind: 'absent',
+        reason: 'timeout: budget exhausted',
+        record: {
+          model_id: 'gemini/x',
+          used_llm: false,
+          failure_reason: 'timeout',
+          latency_ms: 8000,
+        },
+      }),
+    };
+    const s = stack({ verifier: down });
+    const buyer = new Buyer(makeIntentMandate(principal));
+    await s.send(buyer.register());
+    const cart = buyer.cart(randomUUID());
+    const v = verdictOf((await s.send(cart)).body);
+    expect(v).toMatchObject({ verdict: 'escalate', layer: 'intent_verifier', reasons: [] });
+    await s.settlement.engine.drain();
+    expect(s.razorpay.createCalls).toBe(0);
+    expect(s.sellerInbox[0]!.body).toMatchObject({ verdict: 'escalate' });
+    expect((await s.app.inject({ method: 'GET', url: '/health' })).json()).toMatchObject({
+      pending_escalations: 1,
+    });
+    const q = await s.queue();
+    expect(q.body.pending).toHaveLength(1);
+    expect(q.body.pending[0]).toMatchObject({
+      cart_mandate_hash: cart.body.mandate_hash,
+      goal: 'Anniversary gift for spouse — something thoughtful under budget',
+      total: 417_276,
+      line_items: [{ item_id: 'itm_vase', category: 'gifts', quantity: 1 }],
+      details: [
+        'intent-verifier absent: timeout: budget exhausted — held for a human, never allowed',
+      ],
+      verifier: { kind: 'absent' },
+    });
+    // While held, a second cart on the same ref cannot race it (FEATURE-008 #3).
+    const second = verdictOf((await s.send(buyer.cart(randomUUID(), { unit: 400_000 }))).body);
+    expect(second.reasons).toEqual(['MANDATE_IN_REVIEW']);
+  });
+
+  it('APPROVE: verdict seq 2 allow/human/HUMAN_APPROVED on /verdict, order paid, seller got both verdicts, queue empty', async () => {
+    const { s, cart, hash } = await held();
+    const res = await s.review(hash, {
+      decision: 'approve',
+      reviewer: 'sankalp',
+      note: 'known client',
+    });
+    expect(res.status).toBe(200);
+    const v = verdictOf(res.body['verdict'] as Message);
+    expect(v).toMatchObject({ verdict: 'allow', layer: 'human', reasons: ['HUMAN_APPROVED'] });
+    expect((res.body['verdict'] as Message).seq).toBe(2); // buyer stream: escalate was 1
+    expect(await s.poll(hash)).toEqual(res.body['verdict']);
+    await s.settlement.engine.drain();
+    expect(s.settlement.engine.row(hash)?.status).toBe('paid');
+    expect(s.sellerInbox.map((m) => (m.body as BodyOf<'firewall_verdict'>).verdict)).toEqual([
+      'escalate',
+      'allow',
+    ]);
+    expect(s.sellerInbox.map((m) => m.seq)).toEqual([1, 2]);
+    expect(s.cartRow(hash)).toMatchObject({ settlement_dispatched: 1, seller_notified: 1 });
+    expect((await s.queue()).body.pending).toEqual([]);
+    expect(s.db.prepare('SELECT * FROM escalations').get()).toMatchObject({
+      status: 'decided',
+      decision: 'approve',
+      reviewer: 'sankalp',
+      note: 'known client',
+    });
+    expect(
+      s.db.prepare('SELECT state FROM sessions WHERE session_id = ?').get(cart.session_id),
+    ).toEqual({ state: 'SETTLING' });
+  });
+
+  it('REJECT: block/human/HUMAN_REJECTED; nothing to settlement; the mandate is free again', async () => {
+    const { s, buyer, hash } = await held();
+    const res = await s.review(hash, { decision: 'reject', reviewer: 'sankalp' });
+    expect(res.status).toBe(200);
+    expect(verdictOf(res.body['verdict'] as Message)).toMatchObject({
+      verdict: 'block',
+      layer: 'human',
+      reasons: ['HUMAN_REJECTED'],
+    });
+    await s.settlement.engine.drain();
+    expect(s.razorpay.createCalls).toBe(0);
+    expect(s.verdictCount(hash)).toBe(2);
+    // The scripted verifier escalates everything; the point is: not MANDATE_IN_REVIEW.
+    expect(
+      verdictOf((await s.send(buyer.cart(randomUUID(), { unit: 400_000 }))).body).verdict,
+    ).toBe('escalate');
+  });
+
+  it('TIMEOUT (T10): past expires_at the poll returns block/human/ESCALATION_TIMEOUT; a late approve → 409 ALREADY_DECIDED, no third verdict', async () => {
+    let t = NOW().getTime();
+    const { s, hash } = await held({ now: () => new Date(t), escalationTimeoutSec: 600 });
+    t += 599_000;
+    expect((await s.poll(hash)).body).toMatchObject({ verdict: 'escalate' });
+    t += 2_000; // 601 s: the hold is the sweep's now
+    const v = await s.poll(hash);
+    expect(verdictOf(v)).toMatchObject({
+      verdict: 'block',
+      layer: 'human',
+      reasons: ['ESCALATION_TIMEOUT'],
+    });
+    const late = await s.review(hash, { decision: 'approve', reviewer: 'too-late' });
+    expect(late.status).toBe(409);
+    expect(late.body).toMatchObject({ error: 'ALREADY_DECIDED' });
+    expect(late.body['verdict']).toEqual(v);
+    expect(s.verdictCount(hash)).toBe(2);
+    await s.settlement.engine.drain();
+    expect(s.razorpay.createCalls).toBe(0);
+    expect(s.db.prepare('SELECT decision FROM escalations').get()).toEqual({ decision: 'timeout' });
+  });
+
+  it('RACE the other way: approved first, then the clock passes the deadline — the sweep does nothing', async () => {
+    let t = NOW().getTime();
+    const { s, hash } = await held({ now: () => new Date(t), escalationTimeoutSec: 600 });
+    expect((await s.review(hash, { decision: 'approve', reviewer: 'sankalp' })).status).toBe(200);
+    t += 3_600_000;
+    await s.app.firewall.sweepExpired();
+    expect((await s.poll(hash)).body).toMatchObject({
+      verdict: 'allow',
+      reasons: ['HUMAN_APPROVED'],
+    });
+    expect(s.verdictCount(hash)).toBe(2);
+    expect(s.db.prepare('SELECT decision FROM escalations').get()).toEqual({ decision: 'approve' });
+    // And a second human decision is refused too.
+    expect((await s.review(hash, { decision: 'reject', reviewer: 'other' })).status).toBe(409);
+  });
+
+  it('the human sits below the policy: approve after the mandate expired → block with layer-1 reasons, no order', async () => {
+    let t = NOW().getTime();
+    const { s, hash } = await held({
+      now: () => new Date(t),
+      escalationTimeoutSec: 30 * 24 * 3600,
+    });
+    t = Date.parse('2026-09-02T00:00:00.000Z'); // fixture valid_until / deadline are 2026-09-01
+    const res = await s.review(hash, { decision: 'approve', reviewer: 'sankalp' });
+    expect(res.status).toBe(200);
+    expect(verdictOf(res.body['verdict'] as Message)).toMatchObject({
+      verdict: 'block',
+      layer: 'policy',
+      reasons: ['MANDATE_EXPIRED', 'DEADLINE_PASSED'],
+    });
+    await s.settlement.engine.drain();
+    expect(s.razorpay.createCalls).toBe(0);
+  });
+
+  it('review gate: no token → 401; wrong body → 400; unknown hash → 404; token unset → 503', async () => {
+    const { s, hash } = await held();
+    expect((await s.review(hash, { decision: 'approve', reviewer: 'x' }, null)).status).toBe(401);
+    expect((await s.review(hash, { decision: 'approve', reviewer: 'x' }, 'nope')).status).toBe(401);
+    expect((await s.review(hash, { decision: 'maybe', reviewer: 'x' })).status).toBe(400);
+    expect((await s.review(hash, { decision: 'approve' })).status).toBe(400);
+    expect((await s.review('e'.repeat(64), { decision: 'approve', reviewer: 'x' })).status).toBe(
+      404,
+    );
+    expect(s.verdictCount(hash)).toBe(1); // nothing above decided anything
+    const closed = stack({ reviewToken: null });
+    expect((await closed.app.inject({ method: 'GET', url: '/review' })).statusCode).toBe(503);
+    expect((await closed.app.inject({ method: 'GET', url: '/health' })).json()).toMatchObject({
+      review: 'disabled (FIREWALL_REVIEW_TOKEN unset)',
+    });
+  });
+
+  it('idempotent re-send of a held cart returns the escalate verdict; no second hold', async () => {
+    const { s, buyer, cart, hash } = await held();
+    const resent = buildMessage('cart_mandate', 'buyer', cart.body, buyer.key, {
+      session_id: cart.session_id,
+      seq: buyer.next(cart.session_id),
+      timestamp: NOW().toISOString(),
+      agent_id: buyer.agentId,
+    });
+    expect(verdictOf((await s.send(resent)).body).verdict).toBe('escalate');
+    expect((await s.queue()).body.pending).toHaveLength(1);
+    expect(s.verdictCount(hash)).toBe(1);
   });
 });
