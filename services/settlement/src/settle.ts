@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { signObject, type BodyOf, type Message } from '@negotiator/protocol';
+import { signObject, type BodyOf, type JsonValue, type Message } from '@negotiator/protocol';
 import type { SettlementDb } from './db.js';
-import { appendEvent, type SettlementEvent } from './events.js';
+import { appendEvent, ledgerFor, type SettlementEvent } from './events.js';
 import { RazorpayError, type RazorpayClient, type RazorpayOrder } from './razorpay.js';
 import { buildSimulatedWebhook, verifyWebhookSignature, type WebhookEvent } from './webhook.js';
 
@@ -362,6 +362,12 @@ export class SettlementEngine {
         'UPDATE settlements SET receipt_json = ?, receipt_seq = ?, updated_at = ? WHERE mandate_hash = ?',
       )
       .run(JSON.stringify(receipt), seq, this.now().toISOString(), row.mandate_hash);
+    // The signed receipt is a message (polled, not pushed — §7.11): on record.
+    ledgerFor(this.deps.db, this.now).append(
+      'MESSAGE_OUT',
+      { ...(receipt as unknown as Record<string, JsonValue>), receiver: 'polled' },
+      { session_id: row.session_id, ref: row.mandate_hash },
+    );
     appendEvent(
       this.deps.db,
       row.mandate_hash,

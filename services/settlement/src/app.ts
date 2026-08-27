@@ -7,9 +7,12 @@ import {
   makeBoundary,
   signObject,
   type ErrorCode,
+  type JsonValue,
   type Message,
 } from '@negotiator/protocol';
 import { openDb, SqliteReplayStore, type SettlementDb } from './db.js';
+import { ledgerFor } from './events.js';
+import { ledgerRoutes } from './ledger-routes.js';
 import {
   LiveRazorpayClient,
   SimulatedRazorpayClient,
@@ -38,6 +41,8 @@ export interface AppOptions {
   orderStatusPoll?: boolean;
   retry?: RetryPolicy;
   sleep?: (ms: number) => Promise<void>;
+  /** Operator read API secret (ledger, sessions); defaults to DASHBOARD_TOKEN. */
+  dashboardToken?: string;
 }
 
 /**
@@ -126,6 +131,10 @@ export function buildApp(opts: AppOptions = {}) {
     log: app.log,
   });
   app.decorate('engine', engine);
+  const ledger = ledgerFor(db, now);
+  const dashboardToken = opts.dashboardToken ?? env['DASHBOARD_TOKEN'];
+  const asPayload = (m: Message): Record<string, JsonValue> =>
+    m as unknown as Record<string, JsonValue>;
 
   const receive = makeBoundary({
     // Sole caller (D011): only the firewall key ever resolves.
@@ -156,7 +165,36 @@ export function buildApp(opts: AppOptions = {}) {
     order_status_poll: orderStatusPoll,
     firewall_key_configured: Boolean(firewallPublicKey),
     signing_key: signingKeySource,
+    ledger_entries: ledger.count(),
+    operator_api: dashboardToken ? 'enabled' : 'disabled (DASHBOARD_TOKEN unset)',
   }));
+
+  // Operator API (D024): this service's ledger and its settlements, read-only.
+  const dashGate = ledgerRoutes(app, ledger, dashboardToken);
+  app.get('/sessions', async (req, reply) => {
+    const denied = dashGate(req);
+    if (denied) return reply.code(denied.status).send({ error: denied.error });
+    return reply.code(200).send({
+      sessions: db
+        .prepare(
+          `SELECT session_id, mandate_hash, status, amount, currency, razorpay_order_id,
+                  razorpay_payment_id, attempts, failure_code, paid_at, created_at, updated_at
+             FROM settlements ORDER BY rowid DESC LIMIT 200`,
+        )
+        .all(),
+    });
+  });
+
+  /** A handler-level refusal: authenticated, seq consumed, on the session's record. */
+  const refuse = (msg: Message, code: ErrorCode, detail: string) => {
+    const err = errorMessage(msg, code, detail);
+    ledger.append(
+      'HANDLER_REJECTED',
+      { code, detail, reply: asPayload(err) },
+      { session_id: msg.session_id },
+    );
+    return err;
+  };
 
   app.post('/acnp', async (req, reply) => {
     if (!firewallPublicKey)
@@ -164,14 +202,22 @@ export function buildApp(opts: AppOptions = {}) {
     const result = receive(req.body);
     if (!result.ok) {
       app.log.warn({ code: result.code, detail: result.detail }, 'boundary rejection');
-      return reply.code(200).send(errorMessage(req.body, result.code, result.detail));
+      const err = errorMessage(req.body, result.code, result.detail);
+      ledger.append('BOUNDARY_REJECTED', {
+        code: result.code,
+        detail: result.detail,
+        claimed_session_id: err.session_id,
+        reply: asPayload(err),
+      });
+      return reply.code(200).send(err);
     }
     const msg = result.message;
+    ledger.append('MESSAGE_IN', asPayload(msg), { session_id: msg.session_id });
     if (msg.type !== 'settlement_request') {
       result.commit(); // authenticated but unwelcome: consumes seq (§6)
       return reply
         .code(200)
-        .send(errorMessage(msg, 'STATE_INVALID', `settlement does not accept ${msg.type}`));
+        .send(refuse(msg, 'STATE_INVALID', `settlement does not accept ${msg.type}`));
     }
     const verified = verifySettlementRequest(
       msg as Message<'settlement_request'>,
@@ -180,7 +226,7 @@ export function buildApp(opts: AppOptions = {}) {
     if (!verified.ok) {
       result.commit();
       app.log.warn({ code: verified.code, detail: verified.detail }, 'settlement_request rejected');
-      return reply.code(200).send(errorMessage(msg, verified.code, verified.detail));
+      return reply.code(200).send(refuse(msg, verified.code, verified.detail));
     }
     const outcome = engine.accept(
       msg as Message<'settlement_request'>,

@@ -502,3 +502,84 @@ describe(`${SERVICE_NAME} — misc`, () => {
     expect(((await s.post(msg)).json() as Message<'error'>).body.code).toBe('SCHEMA_INVALID');
   });
 });
+
+/**
+ * FEATURE-010 (D018 → D023): the service ledger absorbs the money chain
+ * verbatim, records the request in and the receipt out, and verifies.
+ */
+describe(`${SERVICE_NAME} — audit ledger absorbs the money chain (F6)`, () => {
+  const DASH = 'dash-secret';
+  const api = async (s: ReturnType<typeof stack>, path: string) => {
+    const res = await s.app.inject({
+      method: 'GET',
+      url: path,
+      headers: { 'x-dashboard-token': DASH },
+    });
+    return { status: res.statusCode, body: res.json() as Record<string, unknown> };
+  };
+
+  it('request in → every settlement event verbatim (with its money-chain hash) → receipt out; both chains verify', async () => {
+    const s = stack({ dashboardToken: DASH });
+    const session = randomUUID();
+    const cart = makeCart(session);
+    const hash = cart.body.mandate_hash;
+    expect((await s.post(makeRequest(session, cart, makeVerdict(session, hash)))).statusCode).toBe(
+      204,
+    );
+    await s.app.engine.drain();
+    const receipt = (await s.receipt(hash)).json() as Message<'settlement_receipt'>;
+    expect(receipt.body.status).toBe('paid');
+
+    type E = { entry_type: string; ref: string | null; payload: Record<string, unknown> };
+    const entries = (await api(s, `/ledger?session_id=${session}`)).body['entries'] as E[];
+    const shape = entries.map((e) => `${e.entry_type}:${(e.payload['type'] as string) ?? ''}`);
+    expect(shape).toEqual([
+      'MESSAGE_IN:settlement_request',
+      'SETTLEMENT_EVENT:REQUEST_ACCEPTED',
+      'SETTLEMENT_EVENT:SETTLEMENT_ATTEMPT',
+      'SETTLEMENT_EVENT:ORDER_CREATED',
+      'SETTLEMENT_EVENT:PAYMENT_CONFIRMED',
+      'MESSAGE_OUT:settlement_receipt',
+      'SETTLEMENT_EVENT:RECEIPT_ISSUED',
+    ]);
+    // Verbatim: the money-chain hashes are inside the ledger entries, in order.
+    const money = listEvents(s.db, hash);
+    const absorbed = entries
+      .filter((e) => e.entry_type === 'SETTLEMENT_EVENT')
+      .map((e) => e.payload['entry_hash']);
+    expect(absorbed).toEqual(money.map((e) => e.entry_hash));
+    // The receipt cites the confirming money-chain entry; that hash is in the ledger.
+    expect(absorbed).toContain(receipt.body.ledger_entry_hash);
+    expect(entries.every((e) => e.ref === hash || e.entry_type === 'MESSAGE_IN')).toBe(true);
+    expect(verifyChain(s.db, hash)).toMatchObject({ ok: true });
+    expect((await api(s, '/ledger/verify')).body).toMatchObject({ ok: true, length: 7 });
+    expect((await api(s, '/sessions')).body['sessions']).toHaveLength(1);
+    expect((await s.app.inject({ method: 'GET', url: '/ledger' })).statusCode).toBe(401);
+  });
+
+  it('a forged request is a BOUNDARY_REJECTED entry; a mismatched verdict is HANDLER_REJECTED; tamper breaks at that entry', async () => {
+    const s = stack({ dashboardToken: DASH });
+    const session = randomUUID();
+    const cart = makeCart(session);
+    const forged = makeRequest(session, cart, makeVerdict(session, cart.body.mandate_hash), {
+      signer: generateKeyPair(),
+    });
+    expect(((await s.post(forged)).json() as Message<'error'>).body.code).toBe('SIG_INVALID');
+    seqBySession = new Map(); // the forged message consumed nothing (§6)
+    const wrongVerdict = makeVerdict(session, 'f'.repeat(64));
+    expect(
+      ((await s.post(makeRequest(session, cart, wrongVerdict))).json() as Message<'error'>).body
+        .code,
+    ).toBe('VERDICT_MISMATCH');
+    type E = { entry_seq: number; entry_type: string; session_id: string | null };
+    const all = (await api(s, '/ledger')).body['entries'] as E[];
+    expect(all.map((e) => e.entry_type)).toEqual([
+      'BOUNDARY_REJECTED',
+      'MESSAGE_IN',
+      'HANDLER_REJECTED',
+    ]);
+    expect(all[0]!.session_id).toBeNull();
+    s.db.prepare("UPDATE ledger_entries SET payload_json = '{}' WHERE entry_seq = 2").run();
+    expect((await api(s, '/ledger/verify')).body).toMatchObject({ ok: false, break_at_seq: 2 });
+  });
+});

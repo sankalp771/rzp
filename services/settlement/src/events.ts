@@ -1,4 +1,5 @@
-import { canonicalize, sha256Hex } from '@negotiator/protocol';
+import { canonicalize, sha256Hex, type JsonValue } from '@negotiator/protocol';
+import { Ledger } from '@negotiator/ledger';
 import type { SettlementDb } from './db.js';
 
 /**
@@ -14,6 +15,24 @@ import type { SettlementDb } from './db.js';
  */
 
 export const GENESIS_HASH = '0'.repeat(64);
+
+/**
+ * The service-wide audit ledger (FEATURE-010, D023) over the same database.
+ * D018 pre-committed that the global ledger "absorbs rather than re-derives"
+ * the money chain: every settlement event below is also appended to it
+ * VERBATIM — including its own entry_hash — as a SETTLEMENT_EVENT entry, so
+ * the receipt's `ledger_entry_hash` is findable in both chains. One Ledger
+ * per db (the migration is idempotent; the cache just avoids re-running it).
+ */
+const ledgers = new WeakMap<SettlementDb, Ledger>();
+export function ledgerFor(db: SettlementDb, now: () => Date): Ledger {
+  let l = ledgers.get(db);
+  if (!l) {
+    l = new Ledger(db, now);
+    ledgers.set(db, l);
+  }
+  return l;
+}
 
 export type SettlementEventType =
   | 'REQUEST_ACCEPTED'
@@ -76,6 +95,14 @@ export function appendEvent(
       entry.prev_hash,
       entry.entry_hash,
     );
+    // Absorb into the service ledger inside the same transaction (D018).
+    const row = db
+      .prepare('SELECT session_id FROM settlements WHERE mandate_hash = ?')
+      .get(mandateHash) as { session_id: string } | undefined;
+    ledgerFor(db, now).append('SETTLEMENT_EVENT', entry as unknown as Record<string, JsonValue>, {
+      session_id: row?.session_id ?? null,
+      ref: mandateHash,
+    });
     return entry;
   });
   return tx();
