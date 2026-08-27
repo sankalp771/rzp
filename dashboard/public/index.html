@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>The Negotiator — operator console</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root {
+        --bg: #0f1115;
+        --fg: #e6e6e6;
+        --dim: #9aa0a6;
+        --card: #181b22;
+        --line: #2a2f3a;
+        --ok: #3ddc84;
+        --bad: #ff5c5c;
+        --warn: #ffb74d;
+        --acc: #7aa2f7;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          14px/1.45 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          Consolas,
+          monospace;
+      }
+      header {
+        display: flex;
+        gap: 16px;
+        align-items: baseline;
+        padding: 12px 18px;
+        border-bottom: 1px solid var(--line);
+      }
+      header h1 {
+        font-size: 16px;
+        margin: 0;
+      }
+      header .sub {
+        color: var(--dim);
+        font-size: 12px;
+      }
+      nav {
+        display: flex;
+        gap: 4px;
+        padding: 8px 18px;
+        border-bottom: 1px solid var(--line);
+      }
+      nav button {
+        background: transparent;
+        color: var(--dim);
+        border: 1px solid transparent;
+        padding: 6px 12px;
+        cursor: pointer;
+        font: inherit;
+      }
+      nav button.active {
+        color: var(--fg);
+        border-color: var(--line);
+        background: var(--card);
+      }
+      main {
+        padding: 16px 18px;
+        max-width: 1400px;
+      }
+      section {
+        display: none;
+      }
+      section.active {
+        display: block;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 12px 14px;
+        margin-bottom: 12px;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      button.act {
+        background: var(--acc);
+        color: #000;
+        border: 0;
+        padding: 6px 12px;
+        cursor: pointer;
+        font: inherit;
+        border-radius: 4px;
+      }
+      button.act.danger {
+        background: var(--bad);
+      }
+      button.act.ghost {
+        background: transparent;
+        color: var(--fg);
+        border: 1px solid var(--line);
+      }
+      select,
+      input,
+      textarea {
+        background: #0b0d11;
+        color: var(--fg);
+        border: 1px solid var(--line);
+        padding: 6px 8px;
+        font: inherit;
+        border-radius: 4px;
+      }
+      textarea {
+        width: 100%;
+        min-height: 220px;
+      }
+      pre {
+        white-space: pre-wrap;
+        word-break: break-all;
+        margin: 0;
+      }
+      .ok {
+        color: var(--ok);
+      }
+      .bad {
+        color: var(--bad);
+      }
+      .warn {
+        color: var(--warn);
+      }
+      .dim {
+        color: var(--dim);
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+      }
+      td,
+      th {
+        text-align: left;
+        padding: 4px 8px;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+      }
+      .badge {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 3px;
+        font-size: 11px;
+        border: 1px solid var(--line);
+        color: var(--dim);
+      }
+      .b-buyer {
+        color: #7aa2f7;
+      }
+      .b-merchant {
+        color: #e0af68;
+      }
+      .b-firewall {
+        color: #bb9af7;
+      }
+      .b-settlement {
+        color: #9ece6a;
+      }
+      .honest {
+        color: var(--dim);
+        font-size: 12px;
+        margin-top: 6px;
+      }
+      details summary {
+        cursor: pointer;
+        color: var(--dim);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>The Negotiator</h1>
+      <span class="sub"
+        >operator console · fully trusted (no login; localhost demo) ·
+        <span id="hdr-health" class="dim">checking parties…</span></span
+      >
+    </header>
+    <nav>
+      <button data-tab="run" class="active">Run</button>
+      <button data-tab="queue">Queue</button>
+      <button data-tab="replay">Replay &amp; audit</button>
+      <button data-tab="policy">Policy</button>
+      <button data-tab="evals">Evals</button>
+    </nav>
+    <main>
+      <section id="tab-run" class="active">
+        <div class="card">
+          <div class="row">
+            <label
+              >Target
+              <select id="run-target">
+                <option value="">shortlist (benign: the vase)</option>
+                <option value="var_bookend">
+                  var_bookend — near-floor: the STRATEGY walks away
+                </option>
+                <option value="var_relay_8ch">var_relay_8ch — industrial: LAYER 1 blocks</option>
+                <option value="var_corp_hamper">
+                  var_corp_hamper — every number passes: LAYER 2 / a human decides
+                </option>
+              </select>
+            </label>
+            <button class="act" id="run-go">Start run</button>
+            <span id="run-status" class="dim"></span>
+          </div>
+          <p class="honest">
+            Starts the buyer's <code>/control/run</code> through the proxy. A held cart waits for
+            the Queue tab (up to the buyer's verdict window) — open it in another tab.
+          </p>
+        </div>
+        <div class="card"><pre id="run-out" class="dim">No run yet.</pre></div>
+      </section>
+
+      <section id="tab-queue">
+        <div class="card">
+          <div class="row">
+            <button class="act ghost" id="queue-refresh">Refresh</button
+            ><span id="queue-status" class="dim"></span>
+          </div>
+        </div>
+        <div id="queue-list"></div>
+      </section>
+
+      <section id="tab-replay">
+        <div class="card">
+          <div class="row">
+            <label
+              >Session
+              <select id="replay-session">
+                <option value="">loading…</option>
+              </select></label
+            >
+            <button class="act ghost" id="replay-refresh">Refresh sessions</button>
+            <button class="act" id="replay-load">Load</button>
+            <button class="act ghost" id="replay-verify">Verify all four ledgers</button>
+          </div>
+          <div id="replay-verify-out" class="row" style="margin-top: 8px"></div>
+          <p class="honest">
+            Verification is whole-ledger per party: chains are per service with sessions
+            interleaved, so a single session is never "chain-verified" on its own. What this page
+            can say about one session is: every party's whole ledger verifies, and this session's
+            signed envelopes match across the parties that exchanged them (same
+            <code>message_id</code>, same signature).
+          </p>
+        </div>
+        <div class="card" id="replay-cross"></div>
+        <div class="card"><div id="replay-timeline" class="dim">Pick a session.</div></div>
+      </section>
+
+      <section id="tab-policy">
+        <div class="card">
+          <p class="honest">
+            Merchant policy: discount ceilings, rounds, capabilities. Per-variant floors stay in the
+            catalog. Enforcement is deterministic code reading this config from the next message on
+            (CONSTRAINTS #5).
+          </p>
+          <textarea id="policy-json"></textarea>
+          <div class="row" style="margin-top: 8px">
+            <button class="act ghost" id="policy-load">Reload</button
+            ><button class="act" id="policy-save">Save</button
+            ><span id="policy-status" class="dim"></span>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-evals">
+        <div class="card"><pre id="evals-out" class="dim">No evals report yet (Day 11).</pre></div>
+      </section>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const rupees = (p) => '₹' + (p / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 });
+      const short = (h) => String(h).slice(0, 12) + '…';
+      const esc = (s) =>
+        String(s).replace(
+          /[&<>"]/g,
+          (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c],
+        );
+      async function api(party, path, init) {
+        const res = await fetch(`/api/${party}${path}`, {
+          headers: { 'content-type': 'application/json' },
+          ...init,
+        });
+        let body = null;
+        const text = await res.text();
+        try {
+          body = JSON.parse(text);
+        } catch {
+          body = text;
+        }
+        return { status: res.status, body };
+      }
+
+      // --- tabs
+      document.querySelectorAll('nav button').forEach((b) =>
+        b.addEventListener('click', () => {
+          document
+            .querySelectorAll('nav button')
+            .forEach((x) => x.classList.toggle('active', x === b));
+          document
+            .querySelectorAll('main section')
+            .forEach((s) => s.classList.toggle('active', s.id === 'tab-' + b.dataset.tab));
+          if (b.dataset.tab === 'queue') loadQueue();
+          if (b.dataset.tab === 'replay') loadSessions();
+          if (b.dataset.tab === 'policy') loadPolicy();
+          if (b.dataset.tab === 'evals') loadEvals();
+        }),
+      );
+
+      // --- header health
+      (async () => {
+        const parts = [];
+        for (const p of ['merchant', 'buyer', 'firewall', 'settlement']) {
+          const r = await api(p, '/health').catch(() => ({ status: 0 }));
+          const h = r.body || {};
+          const extra =
+            p === 'firewall' && h.intent_verifier
+              ? ` (${h.intent_verifier === 'not_configured' ? 'layer 1 only' : h.intent_verifier.model})`
+              : p === 'buyer' && h.llm
+                ? ` (${h.llm.model})`
+                : p === 'merchant' && h.llm
+                  ? ` (${h.llm.model})`
+                  : p === 'settlement' && h.razorpay_mode
+                    ? ` (${h.razorpay_mode})`
+                    : '';
+          parts.push(`<span class="${r.status === 200 ? 'ok' : 'bad'}">${p}${extra}</span>`);
+        }
+        $('hdr-health').innerHTML = parts.join(' · ');
+      })();
+
+      // --- Run
+      function renderRun(run) {
+        const L = [];
+        L.push(`session ${run.session_id}`);
+        L.push(
+          `mandate "${run.mandate.goal}"  budget ${rupees(run.mandate.budget_ceiling)}  buyer model ${run.models.buyer}`,
+        );
+        L.push('─'.repeat(70));
+        const carts = run.transcript.filter((t) => t.message.type === 'cart_mandate');
+        for (const { message: m } of run.transcript) {
+          const b = m.body;
+          const role = m.sender.role;
+          const to =
+            role === 'buyer'
+              ? m.type === 'mandate_register' ||
+                (carts.length === 2 && carts[1].message.message_id === m.message_id)
+                ? 'BUYER → FIREWALL'
+                : 'BUYER → SELLER  '
+              : `←  ${role.toUpperCase().padEnd(10)}`;
+          let d = '';
+          if (m.type === 'offer' || m.type === 'counter_offer')
+            d = `round ${b.round} — ${b.line_items[0].variant_id} @ ${rupees(b.line_items[0].proposed_unit_price)}`;
+          else if (m.type === 'accept') d = `at ${rupees(b.total)}`;
+          else if (m.type === 'cart_mandate')
+            d = `${b.line_items[0].catalog_item.category}/${b.line_items[0].variant_id} → ${rupees(b.total)}, hash ${short(b.mandate_hash)}`;
+          else if (m.type === 'firewall_verdict')
+            d = `${b.verdict.toUpperCase()} (layer ${b.layer})${b.reasons.length ? ' — ' + b.reasons.join(', ') : ''}`;
+          else if (m.type === 'settlement_receipt')
+            d = `${b.status.toUpperCase()} — order ${b.razorpay_order_id}, ${rupees(b.amount)}`;
+          else if (m.type === 'walk_away') d = `reason ${b.reason_code}`;
+          else if (m.type === 'error') d = `${b.code}: ${b.detail}`;
+          L.push(`${to}  seq ${String(m.seq).padStart(2)}  ${m.type.padEnd(18)} ${d}`);
+          if (b.rationale) L.push(`             "${b.rationale}"`);
+          if (b.verifier_summary) L.push(`             verifier: "${b.verifier_summary}"`);
+        }
+        L.push('─'.repeat(70));
+        const v = run.verdict;
+        L.push(
+          `OUTCOME: ${run.outcome.toUpperCase()}${run.reason ? ` (${run.reason})` : ''}${v ? ` · verdict ${v.verdict}/${v.layer}` : ''}${run.receipt ? ` · order ${run.receipt.razorpay_order_id}` : ''}`,
+        );
+        for (const n of run.notes) L.push(`  · ${n}`);
+        return L.join('\n');
+      }
+      $('run-go').addEventListener('click', async () => {
+        $('run-status').textContent = 'running… (a held cart waits for the Queue tab)';
+        $('run-out').className = '';
+        $('run-out').textContent = '';
+        const target = $('run-target').value;
+        const r = await api('buyer', '/control/run', {
+          method: 'POST',
+          body: JSON.stringify(target ? { target_variant_id: target } : {}),
+        });
+        if (r.status !== 200) {
+          $('run-status').innerHTML = `<span class="bad">HTTP ${r.status}</span>`;
+          $('run-out').textContent = JSON.stringify(r.body, null, 2);
+          return;
+        }
+        $('run-status').innerHTML =
+          `<span class="${r.body.outcome === 'settled' ? 'ok' : r.body.outcome === 'blocked' ? 'warn' : 'dim'}">${r.body.outcome}</span>`;
+        $('run-out').textContent = renderRun(r.body);
+      });
+
+      // --- Queue
+      async function loadQueue() {
+        const r = await api('firewall', '/review');
+        if (r.status !== 200) {
+          $('queue-status').innerHTML =
+            `<span class="bad">HTTP ${r.status}: ${esc(JSON.stringify(r.body))}</span>`;
+          return;
+        }
+        const pending = r.body.pending;
+        $('queue-status').textContent = pending.length
+          ? `${pending.length} held`
+          : 'nothing held for review';
+        $('queue-list').innerHTML = pending
+          .map(
+            (p) => `
+          <div class="card">
+            <div><b>HELD</b> <span class="dim">${p.cart_mandate_hash}</span></div>
+            <div>goal: <b>${esc(p.goal)}</b> <span class="dim">(principal ${esc(p.principal_id)})</span></div>
+            <div>cart: ${p.line_items.map((li) => `${esc(li.category)}/${esc(li.variant_id)} × ${li.quantity} @ ${rupees(li.unit_price)} — <i>${esc(li.title)}</i>`).join('; ')} → <b>${rupees(p.total)}</b> from ${esc(p.seller_agent_id)}</div>
+            <div>reasons: ${p.reasons.length ? p.reasons.join(', ') : '<span class="dim">(verifier absent)</span>'}</div>
+            ${p.details.map((d) => `<div class="dim">${esc(d)}</div>`).join('')}
+            ${p.verifier && p.verifier.record ? `<div class="dim">verifier: ${esc(p.verifier.record.model_id)} ${p.verifier.record.used_llm ? `in ${p.verifier.record.latency_ms}ms` : '— ' + esc(p.verifier.record.failure_reason || 'absent')}</div>` : ''}
+            <div class="dim">held since ${p.held_since} · times out ${p.expires_at}</div>
+            <div class="row" style="margin-top:8px">
+              <input placeholder="note (optional)" id="note-${p.cart_mandate_hash}" style="min-width:280px" />
+              <button class="act" onclick="decide('${p.cart_mandate_hash}','approve')">Approve</button>
+              <button class="act danger" onclick="decide('${p.cart_mandate_hash}','reject')">Reject</button>
+            </div>
+          </div>`,
+          )
+          .join('');
+      }
+      window.decide = async (hash, decision) => {
+        const note = $('note-' + hash).value;
+        const r = await api('firewall', '/review/' + hash, {
+          method: 'POST',
+          body: JSON.stringify({ decision, reviewer: 'console', ...(note ? { note } : {}) }),
+        });
+        const v = r.body && r.body.verdict && r.body.verdict.body;
+        $('queue-status').innerHTML =
+          r.status === 200
+            ? `<span class="ok">${decision} → ${v.verdict.toUpperCase()} (layer ${v.layer}) ${v.reasons.join(', ')}</span>`
+            : r.status === 409
+              ? `<span class="warn">ALREADY DECIDED — standing verdict ${esc(JSON.stringify(r.body.verdict && r.body.verdict.body))}</span>`
+              : `<span class="bad">HTTP ${r.status}: ${esc(JSON.stringify(r.body))}</span>`;
+        loadQueue();
+      };
+      $('queue-refresh').addEventListener('click', loadQueue);
+
+      // --- Replay & audit
+      const PARTIES = ['buyer', 'merchant', 'firewall', 'settlement'];
+      async function loadSessions() {
+        const r = await api('buyer', '/sessions');
+        const sel = $('replay-session');
+        if (r.status !== 200) {
+          sel.innerHTML = `<option value="">buyer sessions: HTTP ${r.status}</option>`;
+          return;
+        }
+        sel.innerHTML =
+          r.body.sessions
+            .map(
+              (s) =>
+                `<option value="${s.session_id}">${s.session_id.slice(0, 8)}… ${s.state} ${s.verdict ? '· ' + s.verdict : ''} ${s.razorpay_order_id ? '· ' + s.razorpay_order_id : ''} · ${s.created_at}</option>`,
+            )
+            .join('') || '<option value="">no sessions yet</option>';
+      }
+      async function verifyAll() {
+        const out = [];
+        for (const p of PARTIES) {
+          const r = await api(p, '/ledger/verify');
+          const v = r.body || {};
+          out.push(
+            r.status === 200 && v.ok
+              ? `<span class="b-${p}">${p}</span>: <span class="ok">whole ledger verified ✓</span> <span class="dim">(${v.length} entries, head ${short(v.head)})</span>`
+              : r.status === 200
+                ? `<span class="b-${p}">${p}</span>: <span class="bad">CHAIN BROKEN at entry ${v.break_at_seq} (${v.reason}) — ${v.length} entries verified before it</span>`
+                : `<span class="b-${p}">${p}</span>: <span class="bad">HTTP ${r.status}</span>`,
+          );
+        }
+        $('replay-verify-out').innerHTML = out.join('<br>');
+      }
+      async function loadReplay() {
+        const sid = $('replay-session').value;
+        if (!sid) return;
+        await verifyAll();
+        const ledgers = {};
+        for (const p of PARTIES) {
+          const r = await api(p, `/ledger?session_id=${sid}&limit=2000`);
+          ledgers[p] = r.status === 200 ? r.body.entries : [];
+        }
+        // Cross-party: every MESSAGE_OUT with a MESSAGE_IN of the same message_id anywhere must carry the same signature.
+        const outs = [],
+          ins = new Map();
+        for (const p of PARTIES)
+          for (const e of ledgers[p]) {
+            if (e.entry_type === 'MESSAGE_OUT') outs.push({ party: p, e });
+            if (e.entry_type === 'MESSAGE_IN') ins.set(e.payload.message_id, { party: p, e });
+          }
+        let matched = 0,
+          mismatched = 0,
+          unpaired = 0;
+        const rows = [];
+        for (const o of outs) {
+          const i = ins.get(o.e.payload.message_id);
+          if (!i) {
+            unpaired++;
+            continue;
+          }
+          const same =
+            JSON.stringify(o.e.payload.signature) === JSON.stringify(i.e.payload.signature);
+          same ? matched++ : mismatched++;
+          if (!same)
+            rows.push(
+              `<div class="bad">✘ ${o.e.payload.type} ${short(o.e.payload.message_id)}: ${o.party} sent ≠ ${i.party} received</div>`,
+            );
+        }
+        $('replay-cross').innerHTML =
+          `<div>${mismatched === 0 ? '<span class="ok">this session\'s envelopes match across parties ✓</span>' : '<span class="bad">DIVERGENCE between parties ✘</span>'} <span class="dim">(${matched} matched, ${mismatched} mismatched, ${unpaired} recorded by one side only — e.g. a receipt nobody polled)</span></div>${rows.join('')}`;
+        // Timeline: merge by time, then party order.
+        const all = [];
+        for (const p of PARTIES) for (const e of ledgers[p]) all.push({ p, e });
+        all.sort(
+          (a, b) =>
+            a.e.at.localeCompare(b.e.at) ||
+            PARTIES.indexOf(a.p) - PARTIES.indexOf(b.p) ||
+            a.e.entry_seq - b.e.entry_seq,
+        );
+        $('replay-timeline').className = '';
+        $('replay-timeline').innerHTML =
+          `<table><tr><th>at</th><th>party</th><th>#</th><th>entry</th><th>what</th><th>entry_hash</th></tr>` +
+          all
+            .map(({ p, e }) => {
+              const pl = e.payload;
+              let what = '';
+              if (pl.type)
+                what = `${pl.type}${pl.receiver ? ' → ' + pl.receiver : ''}${pl.seq !== undefined ? ' seq ' + pl.seq : ''}${pl.delivery ? ' · ' + pl.delivery : ''}`;
+              else if (e.entry_type === 'VERDICT')
+                what = `${pl.verdict}/${pl.layer} ${pl.reasons.join(',')}`;
+              else if (e.entry_type === 'SESSION_STATE') what = `→ ${pl.state}`;
+              else if (e.entry_type === 'LLM_MOVE')
+                what = `round ${pl.round} ${pl.model_id} ${pl.used_llm ? '' : '(fallback: ' + pl.fallback_reason + ')'}`;
+              else if (e.entry_type === 'BOUNDS_CLAMPED') what = `round ${pl.round}: ${pl.reason}`;
+              else if (
+                e.entry_type === 'ESCALATION_DECIDED' ||
+                e.entry_type === 'ESCALATION_TIMEOUT'
+              )
+                what = `${pl.decision}${pl.reviewer ? ' by ' + pl.reviewer : ''} → ${pl.verdict}/${pl.layer}`;
+              else if (e.entry_type === 'VERIFIER_ABSENT') what = pl.reason;
+              else if (e.entry_type === 'SETTLEMENT_EVENT')
+                what = `${pl.type} (money-chain seq ${pl.seq}, ${short(pl.entry_hash)})`;
+              else if (e.entry_type.endsWith('REJECTED')) what = `${pl.code}: ${pl.detail || ''}`;
+              return `<tr><td class="dim">${e.at.slice(11, 23)}</td><td class="b-${p}">${p}</td><td class="dim">${e.entry_seq}</td><td>${e.entry_type}</td><td>${esc(what)}</td><td class="dim">${short(e.entry_hash)}</td></tr>`;
+            })
+            .join('') +
+          '</table>';
+      }
+      $('replay-refresh').addEventListener('click', loadSessions);
+      $('replay-load').addEventListener('click', loadReplay);
+      $('replay-verify').addEventListener('click', verifyAll);
+
+      // --- Policy
+      async function loadPolicy() {
+        const r = await api('merchant', '/policy');
+        $('policy-json').value =
+          r.status === 200
+            ? JSON.stringify(r.body, null, 2)
+            : `HTTP ${r.status}: ${JSON.stringify(r.body)}`;
+        $('policy-status').textContent = r.status === 200 ? 'loaded' : '';
+      }
+      $('policy-load').addEventListener('click', loadPolicy);
+      $('policy-save').addEventListener('click', async () => {
+        let body;
+        try {
+          body = JSON.parse($('policy-json').value);
+        } catch (e) {
+          $('policy-status').innerHTML = `<span class="bad">not JSON: ${esc(e.message)}</span>`;
+          return;
+        }
+        const r = await api('merchant', '/policy', { method: 'PUT', body: JSON.stringify(body) });
+        $('policy-status').innerHTML =
+          r.status === 200
+            ? '<span class="ok">saved — effective from the next message</span>'
+            : `<span class="bad">HTTP ${r.status}: ${esc(JSON.stringify(r.body))}</span>`;
+        if (r.status === 200) $('policy-json').value = JSON.stringify(r.body, null, 2);
+      });
+
+      // --- Evals
+      async function loadEvals() {
+        const res = await fetch('/api/evals/report');
+        $('evals-out').textContent =
+          res.status === 200
+            ? JSON.stringify(await res.json(), null, 2)
+            : 'No evals report yet (Day 11 writes evals/report.json).';
+      }
+    </script>
+  </body>
+</html>

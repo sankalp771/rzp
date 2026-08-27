@@ -99,6 +99,7 @@ export async function makeStack(opts: StackOptions = {}): Promise<Stack> {
     paymentSimulation: true,
     retry: { maxAttempts: 2, baseMs: 1 },
     sleep: async () => {},
+    dashboardToken: DASHBOARD_TOKEN,
   });
   const settlementGet = async (url: string) => {
     const path = url.replace(SETTLEMENT_URL, '');
@@ -147,6 +148,7 @@ export async function makeStack(opts: StackOptions = {}): Promise<Stack> {
     reviewToken: REVIEW_TOKEN,
     escalationTimeoutSec: opts.escalationTimeoutSec ?? 600,
     sweepIntervalMs: 0,
+    dashboardToken: DASHBOARD_TOKEN,
   });
   const reviewHeaders = { 'x-review-token': REVIEW_TOKEN };
   const pending = async () => {

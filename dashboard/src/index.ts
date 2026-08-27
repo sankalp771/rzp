@@ -1,2 +1,2 @@
-/** Dashboard placeholder — UI lands on Day 10 (FEATURE-010). */
-export const DASHBOARD_PLACEHOLDER = true;
+/** @negotiator/dashboard — the thin operator console (ARCHITECTURE §3, D024). */
+export { buildApp, PARTIES, SERVICE_NAME, type AppOptions, type FetchLike } from './server.js';

@@ -1,5 +1,6 @@
 # One-command spinup of The Negotiator. `docker compose up --build`.
-# Ports: merchant 4001, buyer 4002, firewall 4003, settlement 4004.
+# Ports: merchant 4001, buyer 4002, firewall 4003, settlement 4004,
+# dashboard 4005 (localhost only).
 # Secrets come from .env (copy .env.example); nothing is baked into images.
 
 x-service: &service
@@ -59,6 +60,18 @@ services:
     volumes:
       # SQLite ledger persists across restarts (named volume, see merchant).
       - settlement-data:/app/data
+
+  dashboard:
+    <<: *service
+    build: { context: ., args: { SERVICE: dashboard, SERVICE_DIR: dashboard } }
+    # Published on localhost ONLY: the console is a fully trusted operator
+    # surface with no login of its own (THREAT_MODEL non-goals, D024).
+    ports: ['127.0.0.1:4005:4005']
+    environment: { PORT: 4005 }
+    healthcheck: *healthcheck
+    depends_on:
+      buyer: { condition: service_healthy }
+      settlement: { condition: service_healthy }
 
 volumes:
   merchant-data:

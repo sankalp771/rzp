@@ -25,4 +25,5 @@ for (const [name, kp] of pairs) {
 }
 lines.push(`CONTROL_TOKEN=${randomBytes(24).toString('hex')}`);
 lines.push(`FIREWALL_REVIEW_TOKEN=${randomBytes(24).toString('hex')}`);
+lines.push(`DASHBOARD_TOKEN=${randomBytes(24).toString('hex')}`);
 console.log(lines.join('\n'));

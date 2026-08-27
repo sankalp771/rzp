@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Thin merchant dashboard: policy config, escalation queue, session replay, evals summary",
+  "description": "Thin operator console: run, approval queue, policy, session replay over the four audit ledgers, evals summary",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -13,7 +13,15 @@
     }
   },
   "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "fastify": "^5.5.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.5"
   }
 }
