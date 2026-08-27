@@ -81,8 +81,8 @@ async function firewallInfo() {
     const h = await (await fetch(`${firewallBase}/health`)).json();
     const v = h.intent_verifier;
     return {
-      verifier:
-        v === 'not_configured' ? 'not configured (layer 1 only)' : `${v.provider}/${v.model}`,
+      // model ids already carry the provider prefix (D008 pinning: "mistral/…").
+      verifier: v === 'not_configured' ? 'not configured (layer 1 only)' : v.model,
       review: h.review,
       timeoutSec: h.escalation_timeout_sec,
     };
