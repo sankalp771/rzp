@@ -96,6 +96,9 @@ function migrate(db: MerchantDb): void {
   ensureColumn(db, 'sessions', 'agreed_json', 'TEXT'); // {line_items, total} at AGREED
   ensureColumn(db, 'sessions', 'cart_mandate_hash', 'TEXT');
   ensureColumn(db, 'sessions', 'verdict', 'TEXT');
+  // Day 9 (FEATURE-009): who decided — policy | intent_verifier | human — and why.
+  ensureColumn(db, 'sessions', 'verdict_layer', 'TEXT');
+  ensureColumn(db, 'sessions', 'verdict_reasons_json', 'TEXT');
   ensureColumn(db, 'sessions', 'settlement_status', 'TEXT');
   ensureColumn(db, 'sessions', 'razorpay_order_id', 'TEXT');
 }

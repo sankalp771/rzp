@@ -457,7 +457,11 @@ export class MerchantHandlers {
   /**
    * §7.9: the firewall's verdict for our session, verified against the
    * configured firewall key by the boundary. allow → SETTLING and poll the
-   * receipt; block → BLOCKED; escalate → stay in review (Day 9).
+   * receipt; block → BLOCKED; escalate → the session stays in
+   * COMPLIANCE_REVIEW, held for a human, and the NEXT verdict on the
+   * seller stream (layer `human`, or `policy` if the human's approval failed
+   * the re-check) is the one that moves it. Every verdict's layer and
+   * reasons are recorded so the row says who decided.
    */
   private onFirewallVerdict(msg: Message<'firewall_verdict'>, s: SessionRow): HandlerOutcome {
     const body = msg.body;
@@ -465,11 +469,15 @@ export class MerchantHandlers {
       return this.protocolError(msg, 'STATE_INVALID', 'verdict is for a different cart');
     }
     this.db
-      .prepare('UPDATE sessions SET verdict = ? WHERE session_id = ?')
-      .run(body.verdict, s.session_id);
+      .prepare(
+        'UPDATE sessions SET verdict = ?, verdict_layer = ?, verdict_reasons_json = ? WHERE session_id = ?',
+      )
+      .run(body.verdict, body.layer, JSON.stringify(body.reasons), s.session_id);
     this.log[body.verdict === 'allow' ? 'info' : 'warn'](
       { session_id: s.session_id, verdict: body.verdict, layer: body.layer, reasons: body.reasons },
-      'firewall_verdict received',
+      body.verdict === 'escalate'
+        ? 'firewall_verdict escalate: held for a human decision (COMPLIANCE_REVIEW)'
+        : 'firewall_verdict received',
     );
     if (body.verdict === 'block') {
       this.setState(s.session_id, 'BLOCKED');

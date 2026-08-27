@@ -204,6 +204,76 @@ describe('merchant — cart copy (§7.8) and verdict (§7.9)', () => {
     });
   });
 
+  it('escalate → held in COMPLIANCE_REVIEW; the human allow (seq 2) → SETTLING → SETTLED; who decided is on the row', async () => {
+    let served: Message | null = null;
+    const s = makeStack({
+      get: async () => ({ status: 200, body: JSON.parse(JSON.stringify(served)) }),
+    });
+    const { vase, ask, acceptId } = await reachAgreed(s);
+    const cart = cartBody(vase, ask, acceptId);
+    served = receiptFor(cart.mandate_hash);
+    await s.send('cart_mandate', 'buyer', cart);
+    const hold = await s.send('firewall_verdict', 'firewall', {
+      cart_mandate_hash: cart.mandate_hash,
+      verdict: 'escalate',
+      layer: 'intent_verifier',
+      reasons: ['INTENT_DRIFT_QUANTITY'],
+      verifier_summary: 'looks like a bulk lot',
+    });
+    expect(hold.status).toBe(204);
+    await s.app.handlers.drain();
+    expect(s.row()).toMatchObject({
+      state: 'COMPLIANCE_REVIEW',
+      verdict: 'escalate',
+      settlement_status: null,
+    });
+    const human = await s.send('firewall_verdict', 'firewall', {
+      cart_mandate_hash: cart.mandate_hash,
+      verdict: 'allow',
+      layer: 'human',
+      reasons: ['HUMAN_APPROVED'],
+    });
+    expect(human.status).toBe(204);
+    expect(human.sent.seq).toBe(2);
+    await s.app.handlers.drain();
+    expect(s.row()).toMatchObject({
+      state: 'SETTLED',
+      verdict: 'allow',
+      settlement_status: 'paid',
+    });
+    const who = s.db
+      .prepare('SELECT verdict_layer, verdict_reasons_json FROM sessions WHERE session_id = ?')
+      .get(s.session);
+    expect(who).toEqual({ verdict_layer: 'human', verdict_reasons_json: '["HUMAN_APPROVED"]' });
+  });
+
+  it('escalate → human reject / timeout → BLOCKED, nothing polled', async () => {
+    for (const reason of ['HUMAN_REJECTED', 'ESCALATION_TIMEOUT']) {
+      const s = makeStack();
+      const { vase, ask, acceptId } = await reachAgreed(s);
+      const cart = cartBody(vase, ask, acceptId);
+      await s.send('cart_mandate', 'buyer', cart);
+      await s.send('firewall_verdict', 'firewall', {
+        cart_mandate_hash: cart.mandate_hash,
+        verdict: 'escalate',
+        layer: 'intent_verifier',
+        reasons: [],
+      });
+      await s.send('firewall_verdict', 'firewall', {
+        cart_mandate_hash: cart.mandate_hash,
+        verdict: 'block',
+        layer: 'human',
+        reasons: [reason],
+      });
+      await s.app.handlers.drain();
+      expect(s.row(), reason).toMatchObject({
+        state: 'BLOCKED',
+        verdict: 'block',
+        settlement_status: null,
+      });
+    }
+  });
+
   it('block → BLOCKED, nothing polled', async () => {
     const s = makeStack();
     const { vase, ask, acceptId } = await reachAgreed(s);
