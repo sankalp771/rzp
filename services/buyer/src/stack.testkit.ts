@@ -2,6 +2,7 @@ import { generateKeyPair, type Message } from '@negotiator/protocol';
 import type { LlmAdapter } from '@negotiator/llm';
 import { buildApp as buildFirewallApp } from '../../firewall/src/app.js';
 import { openDb as openFirewallDb, type FirewallDb } from '../../firewall/src/db.js';
+import { makeVerifier } from '../../firewall/src/intent.js';
 import { DEFAULT_POLICY } from '../../firewall/src/policy.js';
 import { buildApp as buildMerchantApp } from '../../merchant/src/app.js';
 import { openDb as openMerchantDb, type MerchantDb } from '../../merchant/src/db.js';
@@ -23,6 +24,7 @@ import type { PostFn, RunResult } from './runner.js';
 
 export const NOW = () => new Date('2026-08-25T10:00:00.000Z');
 export const TOKEN = 'test-control-token';
+export const REVIEW_TOKEN = 'test-review-token';
 export const principal = generateKeyPair();
 const firewallKey = generateKeyPair();
 const settlementKey = generateKeyPair();
@@ -41,9 +43,16 @@ export interface StackOptions {
   firewallDown?: boolean;
   buyerLlm?: LlmAdapter;
   sellerLlm?: LlmAdapter;
+  /** The firewall's layer 2 (FEATURE-009); absent = not_configured, layer 1 only. */
+  firewallLlm?: LlmAdapter;
   velocityMax?: number;
   /** A fixed mandate for every run on this stack (proves single-use). */
   mandateOverrides?: Record<string, unknown>;
+  /** Mutable clock for every service (default: frozen at NOW). */
+  now?: () => Date;
+  escalationTimeoutSec?: number;
+  /** How long the buyer waits on a hold before reporting `pending`. */
+  verdictPollTimeoutMs?: number;
 }
 
 export interface Stack {
@@ -56,17 +65,27 @@ export interface Stack {
     payload?: object,
     headers?: Record<string, string>,
   ) => Promise<{ status: number; result: RunResult }>;
+  /** The human queue, as the dashboard / review.mjs would drive it. */
+  pending: () => Promise<{ cart_mandate_hash: string; reasons: string[] }[]>;
+  review: (
+    hash: string,
+    decision: 'approve' | 'reject',
+    reviewer?: string,
+  ) => Promise<{ status: number; body: Record<string, unknown> }>;
+  /** Poll the queue until one hold appears, then decide it (runs beside a run()). */
+  decideWhenHeld: (decision: 'approve' | 'reject') => Promise<string>;
   /** Await the merchant's background receipt poll. */
   drain: () => Promise<void>;
   close: () => Promise<void>;
 }
 
 export async function makeStack(opts: StackOptions = {}): Promise<Stack> {
+  const NOW_ = opts.now ?? NOW;
   const settlementDb = openSettlementDb(':memory:');
   const razorpay = new SimulatedRazorpayClient();
   const settlement = buildSettlementApp({
     db: settlementDb,
-    now: NOW,
+    now: NOW_,
     razorpay,
     signingKey: settlementKey,
     firewallPublicKey: firewallKey.publicKey,
@@ -84,7 +103,7 @@ export async function makeStack(opts: StackOptions = {}): Promise<Stack> {
   const merchantDb = openMerchantDb(':memory:');
   const merchant = buildMerchantApp({
     db: merchantDb,
-    now: NOW,
+    now: NOW_,
     ...(opts.sellerLlm ? { llm: opts.sellerLlm } : {}),
     chain: {
       firewallPublicKey: firewallKey.publicKey,
@@ -102,7 +121,7 @@ export async function makeStack(opts: StackOptions = {}): Promise<Stack> {
   const firewallDb = openFirewallDb(':memory:');
   const firewall = buildFirewallApp({
     db: firewallDb,
-    now: NOW,
+    now: NOW_,
     signingKey: firewallKey,
     principalKeys: [principal.publicKey],
     policy: { ...DEFAULT_POLICY, ...(opts.velocityMax ? { velocityMax: opts.velocityMax } : {}) },
@@ -115,10 +134,30 @@ export async function makeStack(opts: StackOptions = {}): Promise<Stack> {
     },
     dispatchTimeoutMs: 1000,
     notifyTimeoutMs: 1000,
+    verifier: opts.firewallLlm
+      ? makeVerifier(opts.firewallLlm, () => NOW_().getTime())
+      : 'not_configured',
+    reviewToken: REVIEW_TOKEN,
+    escalationTimeoutSec: opts.escalationTimeoutSec ?? 600,
+    sweepIntervalMs: 0,
   });
+  const reviewHeaders = { 'x-review-token': REVIEW_TOKEN };
+  const pending = async () => {
+    const res = await firewall.inject({ method: 'GET', url: '/review', headers: reviewHeaders });
+    return (res.json() as { pending: { cart_mandate_hash: string; reasons: string[] }[] }).pending;
+  };
+  const review = async (hash: string, decision: 'approve' | 'reject', reviewer = 'sankalp') => {
+    const res = await firewall.inject({
+      method: 'POST',
+      url: `/review/${hash}`,
+      headers: reviewHeaders,
+      payload: { decision, reviewer },
+    });
+    return { status: res.statusCode, body: res.json() as Record<string, unknown> };
+  };
 
   const buyerDb = openDb(':memory:');
-  const mandate = seedDemoMandate(principal, NOW, {
+  const mandate = seedDemoMandate(principal, NOW_, {
     ...(opts.budget !== undefined ? { budget_ceiling: opts.budget } : {}),
     ...(opts.mandateOverrides ?? {}),
   });
@@ -145,7 +184,7 @@ export async function makeStack(opts: StackOptions = {}): Promise<Stack> {
 
   const buyer = buildApp({
     db: buyerDb,
-    now: NOW,
+    now: NOW_,
     post,
     mandate,
     controlToken: TOKEN,
@@ -164,7 +203,10 @@ export async function makeStack(opts: StackOptions = {}): Promise<Stack> {
       },
       pollIntervalMs: 1,
       pollTimeoutMs: 1000,
-      sleep: async () => {},
+      verdictPollTimeoutMs: opts.verdictPollTimeoutMs ?? 1000,
+      // A macrotask yield, not a no-op: the buyer's poll loop must let a
+      // concurrently "deciding human" (decideWhenHeld) get the event loop.
+      sleep: () => new Promise((r) => setImmediate(r)),
     },
   });
   return {
@@ -173,6 +215,23 @@ export async function makeStack(opts: StackOptions = {}): Promise<Stack> {
     firewallDb,
     settlementDb,
     razorpay,
+    pending,
+    review,
+    decideWhenHeld: async (decision) => {
+      // The buyer polls /verdict with a no-op sleep, so every await here
+      // interleaves with its loop — a human deciding mid-run, in one process.
+      for (let i = 0; i < 10_000; i++) {
+        const held = await pending();
+        if (held.length > 0) {
+          const hash = held[0]!.cart_mandate_hash;
+          const res = await review(hash, decision);
+          if (res.status !== 200) throw new Error(`review failed: ${JSON.stringify(res.body)}`);
+          return hash;
+        }
+        await new Promise((r) => setImmediate(r));
+      }
+      throw new Error('nothing was ever held');
+    },
     run: async (payload = {}, headers = { 'x-control-token': TOKEN }) => {
       const res = await buyer.inject({
         method: 'POST',

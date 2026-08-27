@@ -76,7 +76,14 @@ export interface BuyerChainConfig {
   settlementPublicKey: string;
   get: GetFn;
   pollIntervalMs: number;
+  /** Receipt poll window (settlement is seconds away). */
   pollTimeoutMs: number;
+  /**
+   * Verdict poll window after an `escalate` — a HUMAN is at the other end,
+   * so this is minutes, not seconds; when it closes the run is `pending`,
+   * never failed (§7.9). Defaults to pollTimeoutMs.
+   */
+  verdictPollTimeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -344,8 +351,27 @@ export class BuyerRunner {
       throw new RunFailure('VERDICT_MISMATCH', 'verdict is for a different cart');
     }
     if (verdictMsg.body.verdict === 'escalate') {
-      notes.push('verdict: escalate — held for a human; polling /verdict');
-      verdictMsg = await this.pollVerdict(cart.mandate_hash, transcript);
+      const held = verdictMsg.body;
+      notes.push(
+        `verdict: ESCALATE (${held.layer}) — held for a human${held.reasons.length ? ` [${held.reasons.join(', ')}]` : ''}; polling /verdict`,
+      );
+      db.prepare('UPDATE sessions SET verdict = ? WHERE session_id = ?').run('escalate', sessionId);
+      const decided = await this.pollVerdict(cart.mandate_hash, transcript);
+      if (!decided) {
+        // §7.9: a hold whose poller gives up is still a hold — pending, not
+        // failed; the verdict, once a human issues it, stays retrievable.
+        // Resuming a held run is Day 10; the hash below is what it needs.
+        notes.push(
+          `still held after ${chain.verdictPollTimeoutMs ?? chain.pollTimeoutMs}ms — outcome pending (approve/reject on the firewall: ${cart.mandate_hash})`,
+        );
+        return {
+          ...this.finish(sessionId, transcript, notes, 'pending', 'HELD_IN_REVIEW'),
+          deal: { line_items: agreement.line_items, total: agreement.total },
+          cart_mandate_hash: cart.mandate_hash,
+          verdict: held,
+        };
+      }
+      verdictMsg = decided;
     }
     const verdict = verdictMsg.body;
     db.prepare('UPDATE sessions SET verdict = ? WHERE session_id = ?').run(
@@ -403,14 +429,18 @@ export class BuyerRunner {
     };
   }
 
-  /** §7.9: after an escalate, poll the firewall until a terminal verdict (Day 9 exercises this). */
+  /**
+   * §7.9: after an escalate, poll the firewall until a terminal verdict
+   * (a human decision or the queue timeout), or null when the verdict poll
+   * window closes — the caller turns that into `pending`, never `failed`.
+   */
   private async pollVerdict(
     hash: string,
     transcript: TranscriptEntry[],
-  ): Promise<Message<'firewall_verdict'>> {
+  ): Promise<Message<'firewall_verdict'> | null> {
     const { chain } = this.deps;
     const url = `${chain.firewallUrl.replace(/\/$/, '')}/verdict/${hash}`;
-    for await (const _tick of this.ticks()) {
+    for await (const _tick of this.ticks(chain.verdictPollTimeoutMs ?? chain.pollTimeoutMs)) {
       const res = await chain.get(url).catch(() => null);
       const parsed = res && messageSchema('firewall_verdict').safeParse(res.body);
       if (parsed && parsed.success) {
@@ -418,13 +448,16 @@ export class BuyerRunner {
         if (!verifyObject(v, chain.firewallPublicKey).ok) {
           throw new RunFailure('SIG_INVALID', 'polled verdict does not verify');
         }
+        if (v.body.cart_mandate_hash !== hash) {
+          throw new RunFailure('VERDICT_MISMATCH', 'polled verdict is for a different cart');
+        }
         if (v.body.verdict !== 'escalate') {
           transcript.push({ direction: 'received', message: v });
           return v;
         }
       }
     }
-    throw new RunFailure('STATE_INVALID', 'no terminal verdict within the polling window');
+    return null;
   }
 
   /** §7.11: the latest signed receipt, or null when the bounded window closes. */
@@ -465,11 +498,11 @@ export class BuyerRunner {
   }
 
   /** Bounded by wall clock AND poll count, so an injected clock can never spin it. */
-  private async *ticks(): AsyncGenerator<number> {
+  private async *ticks(timeoutMs = this.deps.chain.pollTimeoutMs): AsyncGenerator<number> {
     const { chain } = this.deps;
     const sleep = chain.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
-    const deadline = this.now().getTime() + chain.pollTimeoutMs;
-    const maxPolls = Math.ceil(chain.pollTimeoutMs / Math.max(chain.pollIntervalMs, 1)) + 1;
+    const deadline = this.now().getTime() + timeoutMs;
+    const maxPolls = Math.ceil(timeoutMs / Math.max(chain.pollIntervalMs, 1)) + 1;
     for (let i = 0; i < maxPolls && this.now().getTime() <= deadline; i++) {
       yield i;
       await sleep(chain.pollIntervalMs);

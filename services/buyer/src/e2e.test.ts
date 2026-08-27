@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { StubLlmAdapter } from '@negotiator/llm';
 import { verifyObject, type BodyOf, type Message } from '@negotiator/protocol';
-import { makeStack } from './stack.testkit.js';
+import { makeStack, NOW } from './stack.testkit.js';
 import type { RunResult } from './runner.js';
 
 /**
@@ -241,6 +241,195 @@ describe('E2E: F2 and F3', () => {
       n: 0,
     });
     expect(stack.razorpay.createCalls).toBe(0);
+    await stack.close();
+  });
+});
+
+/**
+ * FEATURE-009: layer 2 and the human queue, end to end. The firewall's
+ * verifier is a scripted stub; the buyer really polls /verdict; the human
+ * really decides through /review while the run is in flight.
+ */
+const say = (recommendation: string, reasons: string[] = [], summary = 'because') =>
+  new StubLlmAdapter(JSON.stringify({ recommendation, reasons, summary }));
+
+describe('E2E: layer 2 + the human queue (F3 escalate, Gate 3 items 2–4)', () => {
+  it('FLAGSHIP (semantic): the corporate hamper clears every layer-1 number and is blocked by layer 2 — no order', async () => {
+    const stack = await makeStack({
+      firewallLlm: say('block', ['INTENT_DRIFT_QUANTITY', 'INTENT_DRIFT_CATEGORY'], 'a B2B lot'),
+    });
+    const { result } = await stack.run({ target_variant_id: 'var_corp_hamper' });
+    expect(result.outcome).toBe('blocked');
+    expect(result.reason).toBe('INTENT_DRIFT_QUANTITY,INTENT_DRIFT_CATEGORY');
+    expect(result.verdict).toMatchObject({
+      verdict: 'block',
+      layer: 'intent_verifier',
+      reasons: ['INTENT_DRIFT_QUANTITY', 'INTENT_DRIFT_CATEGORY'],
+      verifier_summary: 'a B2B lot',
+    });
+    // Layer 1 had nothing to say: category gifts, ₹4,700 < ₹5,000, qty 1.
+    expect(result.deal?.line_items[0]?.item_id).toBe('itm_corp_hamper');
+    expect(result.deal!.total).toBeLessThanOrEqual(500_000);
+    await stack.drain();
+    expect(
+      stack.merchantDb
+        .prepare('SELECT state, verdict_layer FROM sessions WHERE session_id = ?')
+        .get(result.session_id),
+    ).toEqual({ state: 'BLOCKED', verdict_layer: 'intent_verifier' });
+    expect(stack.razorpay.createCalls).toBe(0);
+    await stack.close();
+  });
+
+  it('benign cart passes layer 2 without escalation → SETTLED with layer intent_verifier (false-block guard)', async () => {
+    const stack = await makeStack({ firewallLlm: say('allow', [], 'a handmade vase fits') });
+    const { result } = await stack.run();
+    expect(result.outcome).toBe('settled');
+    expect(result.verdict).toMatchObject({
+      verdict: 'allow',
+      layer: 'intent_verifier',
+      reasons: [],
+      verifier_summary: 'a handmade vase fits',
+    });
+    expect(await stack.pending()).toEqual([]);
+    await stack.close();
+  });
+
+  it('ESCALATE → human APPROVES mid-run → allow/human/HUMAN_APPROVED → receipt → SETTLED on both sides', async () => {
+    const stack = await makeStack({
+      firewallLlm: say('escalate', ['INTENT_DRIFT_CATEGORY'], 'could be a gift, could be B2B'),
+    });
+    const [run, hash] = await Promise.all([
+      stack.run({ target_variant_id: 'var_corp_hamper' }),
+      stack.decideWhenHeld('approve'),
+    ]);
+    const { result } = run;
+    expect(result.cart_mandate_hash).toBe(hash);
+    expect(result.outcome).toBe('settled');
+    expect(result.state).toBe('SETTLED');
+    expect(result.verdict).toMatchObject({
+      verdict: 'allow',
+      layer: 'human',
+      reasons: ['HUMAN_APPROVED'],
+    });
+    expect(result.receipt).toMatchObject({ status: 'paid', mandate_hash: hash });
+    expect(types(result).slice(-4)).toEqual([
+      's:cart_mandate', // to the firewall
+      'r:firewall_verdict', // escalate (the HTTP reply)
+      'r:firewall_verdict', // the human's allow (polled from /verdict)
+      'r:settlement_receipt',
+    ]);
+    const verdicts = result.transcript.filter((t) => t.message.type === 'firewall_verdict');
+    expect(verdicts.map((t) => t.message.seq)).toEqual([1, 2]);
+    expect(verdicts.map((t) => (t.message.body as BodyOf<'firewall_verdict'>).verdict)).toEqual([
+      'escalate',
+      'allow',
+    ]);
+    expect(result.notes.some((n) => /ESCALATE .* held for a human/.test(n))).toBe(true);
+    await stack.drain();
+    expect(
+      stack.merchantDb
+        .prepare(
+          'SELECT state, verdict_layer, verdict_reasons_json FROM sessions WHERE session_id = ?',
+        )
+        .get(result.session_id),
+    ).toEqual({
+      state: 'SETTLED',
+      verdict_layer: 'human',
+      verdict_reasons_json: '["HUMAN_APPROVED"]',
+    });
+    expect(stack.firewallDb.prepare('SELECT COUNT(*) AS n FROM verdicts').get()).toEqual({ n: 2 });
+    expect(await stack.pending()).toEqual([]);
+    await stack.close();
+  });
+
+  it('ESCALATE → human REJECTS mid-run → block/human/HUMAN_REJECTED, no order, both sides BLOCKED', async () => {
+    const stack = await makeStack({ firewallLlm: say('escalate') });
+    const [run] = await Promise.all([
+      stack.run({ target_variant_id: 'var_corp_hamper' }),
+      stack.decideWhenHeld('reject'),
+    ]);
+    const { result } = run;
+    expect(result.outcome).toBe('blocked');
+    expect(result.reason).toBe('HUMAN_REJECTED');
+    expect(result.verdict).toMatchObject({ verdict: 'block', layer: 'human' });
+    await stack.drain();
+    expect(
+      stack.merchantDb
+        .prepare('SELECT state FROM sessions WHERE session_id = ?')
+        .get(result.session_id),
+    ).toEqual({ state: 'BLOCKED' });
+    expect(stack.razorpay.createCalls).toBe(0);
+    await stack.close();
+  });
+
+  it('ESCALATE → nobody answers → queue TIMEOUT (T10): the poll returns block/human/ESCALATION_TIMEOUT', async () => {
+    let t = NOW().getTime();
+    const stack = await makeStack({
+      firewallLlm: say('escalate'),
+      now: () => new Date(t),
+      escalationTimeoutSec: 600,
+      verdictPollTimeoutMs: 3_600_000, // the buyer is patient; the queue is not
+    });
+    const runP = stack.run({ target_variant_id: 'var_corp_hamper' });
+    // Once the BUYER holds the escalate verdict (not merely once the firewall
+    // queued it — a clock jump mid-reply would be CLOCK_SKEW, which no real
+    // clock does), the clock passes the queue deadline.
+    const buyerHeld = () =>
+      (
+        stack.buyerDb
+          .prepare("SELECT COUNT(*) AS n FROM sessions WHERE verdict = 'escalate'")
+          .get() as {
+          n: number;
+        }
+      ).n > 0;
+    for (let i = 0; !buyerHeld(); i++) {
+      if (i > 10_000) throw new Error('never held');
+      await new Promise((r) => setImmediate(r));
+    }
+    t += 601_000;
+    const { result } = await runP;
+    expect(result.outcome).toBe('blocked');
+    expect(result.reason).toBe('ESCALATION_TIMEOUT');
+    expect(result.verdict).toMatchObject({
+      verdict: 'block',
+      layer: 'human',
+      reasons: ['ESCALATION_TIMEOUT'],
+    });
+    expect(stack.firewallDb.prepare('SELECT decision FROM escalations').get()).toEqual({
+      decision: 'timeout',
+    });
+    expect(stack.razorpay.createCalls).toBe(0);
+    await stack.close();
+  });
+
+  it('verifier DOWN (empty replies) → escalate, never allow; the buyer gives up → PENDING, not failed; the hold is still decidable', async () => {
+    const stack = await makeStack({ firewallLlm: new StubLlmAdapter('') });
+    const { result } = await stack.run(); // the benign vase — and still no allow without a verdict
+    expect(result.outcome).toBe('pending');
+    expect(result.reason).toBe('HELD_IN_REVIEW');
+    expect(result.state).toBe('COMPLIANCE_REVIEW');
+    expect(result.verdict).toMatchObject({
+      verdict: 'escalate',
+      layer: 'intent_verifier',
+      reasons: [],
+    });
+    expect(result.receipt).toBeUndefined();
+    expect(
+      stack.buyerDb
+        .prepare('SELECT state, verdict FROM sessions WHERE session_id = ?')
+        .get(result.session_id),
+    ).toEqual({ state: 'COMPLIANCE_REVIEW', verdict: 'escalate' });
+    expect(stack.razorpay.createCalls).toBe(0);
+    // The hold outlives the poller: a human can still decide it.
+    const held = await stack.pending();
+    expect(held).toHaveLength(1);
+    expect(held[0]!.cart_mandate_hash).toBe(result.cart_mandate_hash);
+    const res = await stack.review(result.cart_mandate_hash!, 'approve');
+    expect(res.status).toBe(200);
+    expect((res.body['verdict'] as Message).body).toMatchObject({
+      verdict: 'allow',
+      layer: 'human',
+    });
     await stack.close();
   });
 });

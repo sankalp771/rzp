@@ -182,18 +182,21 @@ function chainFromEnv(env: Record<string, string | undefined>): BuyerChainConfig
     get: fetchGet,
     pollIntervalMs: Number(env['RECEIPT_POLL_INTERVAL_MS'] ?? 500),
     pollTimeoutMs: Number(env['RECEIPT_POLL_TIMEOUT_MS'] ?? 60_000),
+    // A human is at the other end of an escalate: minutes, and then `pending`.
+    verdictPollTimeoutMs: Number(env['VERDICT_POLL_TIMEOUT_MS'] ?? 120_000),
   };
 }
 
 /**
- * Sync-binding latency inequality (FEATURE-006 #1, FEATURE-008 #4): the
- * seller's LLM proposal runs INSIDE the merchant's HTTP reply
- * (LLM_TOTAL_BUDGET_MS, 12s incl. retries), and the firewall's settlement
- * dispatch + seller notification run INSIDE its verdict reply
- * (FIREWALL_DISPATCH_TIMEOUT_MS 8s + FIREWALL_NOTIFY_TIMEOUT_MS 5s). This
- * client timeout must exceed each of those plus processing:
+ * Sync-binding latency inequality (FEATURE-006 #1, FEATURE-008 #4,
+ * FEATURE-009): the seller's LLM proposal runs INSIDE the merchant's HTTP
+ * reply (LLM_TOTAL_BUDGET_MS, 12s incl. retries), and the firewall's
+ * intent-verifier + settlement dispatch + seller notification run INSIDE
+ * its verdict reply (FIREWALL_LLM_BUDGET_MS 8s + FIREWALL_DISPATCH_TIMEOUT_MS
+ * 8s + FIREWALL_NOTIFY_TIMEOUT_MS 5s). This client timeout must exceed each
+ * of those plus processing:
  *   BUYER_HTTP_TIMEOUT_MS (30 000) > 12 000 + processing
- *   BUYER_HTTP_TIMEOUT_MS (30 000) > 8 000 + 5 000 + processing
+ *   BUYER_HTTP_TIMEOUT_MS (30 000) > 8 000 + 8 000 + 5 000 + processing
  * If any of these env values changes, keep both inequalities — FLOW.md F1.
  */
 const BUYER_HTTP_TIMEOUT_MS = Number(process.env['BUYER_HTTP_TIMEOUT_MS'] ?? 30_000);
