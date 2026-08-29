@@ -25,6 +25,12 @@ export interface AppOptions {
   controlToken?: string;
   /** Buyer model override for tests; defaults to BUYER_LLM_PROVIDER (D015). */
   llm?: LlmAdapter;
+  /**
+   * Strategy tuning override (FEATURE-011 evals scenarios, e.g. the
+   * aggressive bargainer). Plumbing only: the clamp still applies to every
+   * offer; defaults to DEFAULT_BUYER_TUNING in the runner.
+   */
+  tuning?: { opening_ratio: number; concession_exponent: number };
   /** Firewall + settlement addressing/keys/polling; defaults to env + fetch. */
   chain?: BuyerChainConfig;
   /** Operator read API secret (ledger, sessions); defaults to DASHBOARD_TOKEN. */
@@ -121,6 +127,7 @@ export function buildApp(opts: AppOptions = {}) {
       log: app.log,
       ledger,
       ...(opts.now ? { now: opts.now } : {}),
+      ...(opts.tuning ? { tuning: opts.tuning } : {}),
       clockSkewSec: Number(process.env['CLOCK_SKEW_SEC'] ?? 120),
       llm,
     });
@@ -162,6 +169,7 @@ export function buildApp(opts: AppOptions = {}) {
       log: app.log,
       ledger,
       ...(opts.now ? { now: opts.now } : {}),
+      ...(opts.tuning ? { tuning: opts.tuning } : {}),
       clockSkewSec: Number(process.env['CLOCK_SKEW_SEC'] ?? 120),
       llm,
     });

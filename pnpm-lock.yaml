@@ -40,7 +40,18 @@ importers:
         specifier: ^4.20.5
         version: 4.23.12
 
-  evals: {}
+  evals:
+    dependencies:
+      '@negotiator/llm':
+        specifier: workspace:*
+        version: link:../packages/llm
+      '@negotiator/protocol':
+        specifier: workspace:*
+        version: link:../packages/protocol
+    devDependencies:
+      tsx:
+        specifier: ^4.20.5
+        version: 4.23.12
 
   packages/ledger:
     dependencies:

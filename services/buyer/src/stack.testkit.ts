@@ -6,6 +6,7 @@ import { makeVerifier } from '../../firewall/src/intent.js';
 import { DEFAULT_POLICY } from '../../firewall/src/policy.js';
 import { buildApp as buildMerchantApp } from '../../merchant/src/app.js';
 import { openDb as openMerchantDb, type MerchantDb } from '../../merchant/src/db.js';
+import type { MerchantPolicy } from '../../merchant/src/policy.js';
 import { buildApp as buildSettlementApp } from '../../settlement/src/app.js';
 import { openDb as openSettlementDb, type SettlementDb } from '../../settlement/src/db.js';
 import { SimulatedRazorpayClient } from '../../settlement/src/razorpay.js';
@@ -54,6 +55,13 @@ export interface StackOptions {
   escalationTimeoutSec?: number;
   /** How long the buyer waits on a hold before reporting `pending`. */
   verdictPollTimeoutMs?: number;
+  /** FEATURE-011: buyer strategy tuning for a scenario (the clamp still applies). */
+  buyerTuning?: { opening_ratio: number; concession_exponent: number };
+  /**
+   * FEATURE-011: merchant policy overrides for a scenario, applied through
+   * the real operator API (`PUT /policy`) after boot — no merchant seam.
+   */
+  merchantPolicy?: Partial<MerchantPolicy>;
 }
 
 export interface Stack {
@@ -128,6 +136,18 @@ export async function makeStack(opts: StackOptions = {}): Promise<Stack> {
     },
   });
 
+  if (opts.merchantPolicy) {
+    const headers = { 'x-dashboard-token': DASHBOARD_TOKEN };
+    const current = await merchant.inject({ method: 'GET', url: '/policy', headers });
+    const res = await merchant.inject({
+      method: 'PUT',
+      url: '/policy',
+      headers,
+      payload: { ...(current.json() as MerchantPolicy), ...opts.merchantPolicy },
+    });
+    if (res.statusCode !== 200) throw new Error(`merchant policy override refused: ${res.body}`);
+  }
+
   const firewallDb = openFirewallDb(':memory:');
   const firewall = buildFirewallApp({
     db: firewallDb,
@@ -139,7 +159,8 @@ export async function makeStack(opts: StackOptions = {}): Promise<Stack> {
     merchantUrl: MERCHANT_URL,
     post: async (url, payload) => {
       const app = url.startsWith(SETTLEMENT_URL) ? settlement : merchant;
-      const res = await app.inject({ method: 'POST', url: '/acnp', payload });
+      // PostFn carries `unknown`; inject wants a JSON-able payload (typechecked by evals).
+      const res = await app.inject({ method: 'POST', url: '/acnp', payload: payload as object });
       return { status: res.statusCode, body: res.statusCode === 204 ? null : res.json() };
     },
     dispatchTimeoutMs: 1000,
@@ -179,14 +200,14 @@ export async function makeStack(opts: StackOptions = {}): Promise<Stack> {
     if (url.startsWith(FIREWALL_URL)) {
       if (opts.firewallDown) throw new Error('ECONNREFUSED firewall');
       const sent = opts.tamperToFirewall ? opts.tamperToFirewall(payload as Message) : payload;
-      const res = await firewall.inject({ method: 'POST', url: '/acnp', payload: sent });
+      const res = await firewall.inject({ method: 'POST', url: '/acnp', payload: sent as object });
       return { status: res.statusCode, body: res.statusCode === 204 ? null : res.json() };
     }
     merchantCalls += 1;
     if (opts.replayCall === merchantCalls && lastBody !== null) {
       return { status: 200, body: lastBody }; // adversary replays the previous reply
     }
-    const res = await merchant.inject({ method: 'POST', url: '/acnp', payload });
+    const res = await merchant.inject({ method: 'POST', url: '/acnp', payload: payload as object });
     let body: unknown = res.statusCode === 204 ? null : res.json();
     if (body !== null && opts.tamper) body = opts.tamper(body as Message, merchantCalls);
     if (body !== null) lastBody = body;
@@ -201,6 +222,7 @@ export async function makeStack(opts: StackOptions = {}): Promise<Stack> {
     controlToken: TOKEN,
     dashboardToken: DASHBOARD_TOKEN,
     ...(opts.buyerLlm ? { llm: opts.buyerLlm } : {}),
+    ...(opts.buyerTuning ? { tuning: opts.buyerTuning } : {}),
     chain: {
       firewallUrl: FIREWALL_URL,
       firewallPublicKey: firewallKey.publicKey,

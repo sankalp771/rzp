@@ -16,7 +16,8 @@
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "evals": "pnpm --filter @negotiator/evals run evals"
   },
   "devDependencies": {
     "@eslint/js": "^9.34.0",

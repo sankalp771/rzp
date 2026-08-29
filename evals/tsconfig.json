@@ -1,6 +1,8 @@
 {
   "extends": "../tsconfig.base.json",
-  "compilerOptions": { "rootDir": "src", "outDir": "dist", "composite": true },
+  // The harness drives the E2E test kit (build-excluded TypeScript source in
+  // services/buyer), so it is run from source by tsx and only typechecked here.
+  "compilerOptions": { "noEmit": true },
   "include": ["src"],
   "exclude": ["src/**/*.test.ts"]
 }

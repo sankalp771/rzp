@@ -3,17 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Evals harness: N synthetic negotiations, honest metrics report",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
-  },
+  "description": "Evals harness: N synthetic negotiations over the in-process stack, honest metrics report",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "evals": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@negotiator/llm": "workspace:*",
+    "@negotiator/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.5"
   }
 }
