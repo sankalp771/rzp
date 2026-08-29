@@ -6,6 +6,8 @@ import { makeStack, type Stack } from '../../services/buyer/src/stack.testkit.js
 import type { MerchantDb } from '../../services/merchant/src/db.js';
 import type { VariantPricing } from '../../services/merchant/src/policy.js';
 import { effectiveFloorFor, predictCurve } from './curves.js';
+import { detectFloorLeaks } from './floorleak.js';
+import { sessionRateLimited } from './providers.js';
 import { drawParams, sessionSeed, type Scenario } from './scenarios.js';
 import type {
   CaughtBy,
@@ -79,6 +81,12 @@ export async function runSession(input: SessionInput): Promise<SessionRecord> {
     const judged = classify(scenario.truth, result);
     const settled = result.outcome === 'settled' ? (result.receipt?.amount ?? null) : null;
     const listTotal = target.list_price;
+    const llm = {
+      buyer: moves(stack.buyerDb, result.session_id),
+      seller: moves(stack.merchantDb, result.session_id),
+      verifier: result.cart_mandate_hash ? verifierRow(stack, result.cart_mandate_hash) : null,
+    };
+    const transcript = result.transcript.map(compact);
     return {
       ...base,
       target,
@@ -99,12 +107,10 @@ export async function runSession(input: SessionInput): Promise<SessionRecord> {
         : null,
       ...judged,
       curve,
-      llm: {
-        buyer: moves(stack.buyerDb, result.session_id),
-        seller: moves(stack.merchantDb, result.session_id),
-        verifier: result.cart_mandate_hash ? verifierRow(stack, result.cart_mandate_hash) : null,
-      },
-      transcript: result.transcript.map(compact),
+      llm,
+      floor_leaks: detectFloorLeaks(transcript, [target.floor_price, target.effective_floor]),
+      rate_limited: sessionRateLimited(llm),
+      transcript,
       notes: result.notes,
       at: new Date().toISOString(),
       wall_ms: Date.now() - started,
@@ -130,6 +136,8 @@ export async function runSession(input: SessionInput): Promise<SessionRecord> {
       escalated: false,
       curve: null,
       llm: { buyer: [], seller: [], verifier: null },
+      floor_leaks: [],
+      rate_limited: /rate_limited|\b429\b/i.test(String(err)),
       transcript: [],
       notes: [],
       at: new Date().toISOString(),

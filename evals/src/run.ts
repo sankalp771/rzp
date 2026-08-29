@@ -1,8 +1,17 @@
 import { execSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { pooled, scenarioMetrics } from './metrics.js';
-import { failuresOf, renderMarkdown, summarize, type Report } from './report.js';
+import { floorLeakSummary } from './floorleak.js';
+import { economics, pooled, scenarioMetrics } from './metrics.js';
+import { providerStats } from './providers.js';
+import {
+  failuresOf,
+  reading,
+  renderMarkdown,
+  summarize,
+  type Comparison,
+  type Report,
+} from './report.js';
 import { SCENARIOS, scenarioById, type Scenario } from './scenarios.js';
 import { runSession, type Adapters } from './session.js';
 import { RunStore } from './store.js';
@@ -11,7 +20,7 @@ import type { Mode, ScenarioId, SessionRecord } from './types.js';
 /**
  * The run loop: scenarios × N, resumable from `sessions.jsonl`, paced when
  * asked, and always ending in a report that says how many sessions
- * actually ran. The CLI and the smoke test both call this.
+ * actually ran. The CLI and the tests both call this.
  */
 
 export interface RunOptions {
@@ -25,9 +34,15 @@ export interface RunOptions {
   clock?: 'frozen' | 'real';
   /** Sleep between executed sessions (live pacing). */
   paceMs?: number;
-  /** Return true to stop the run cleanly after this session (e.g. repeated rate limits). */
-  onSession?: (record: SessionRecord, done: number, total: number) => boolean | void;
-  /** Wrote by the CLI to say why it stopped; carried into provenance. */
+  /** Another run id under `runsDir` whose executed economics are shown beside the curve prediction. */
+  baseline?: string;
+  /** Return (or resolve) true to stop the run cleanly after this session (e.g. repeated rate limits). */
+  onSession?: (
+    record: SessionRecord,
+    done: number,
+    total: number,
+  ) => boolean | void | Promise<boolean | void>;
+  /** Asked once when a stop happens; carried into provenance. */
   stoppedEarly?: () => string | null;
 }
 
@@ -67,7 +82,7 @@ export async function runEvals(opts: RunOptions): Promise<RunOutput> {
       records.push(record);
       done.add(RunStore.key(record));
       executed += 1;
-      if (opts.onSession?.(record, records.length, total)) {
+      if (await opts.onSession?.(record, records.length, total)) {
         stopped = opts.stoppedEarly?.() ?? 'stopped by caller';
         break outer;
       }
@@ -75,6 +90,13 @@ export async function runEvals(opts: RunOptions): Promise<RunOutput> {
     }
   }
 
+  const pool = pooled(records);
+  const comparison: Comparison = {
+    curve: pool.benign?.curve ?? economics([]),
+    this_run: pool.benign?.llm ?? economics([]),
+    ...baselineOf(opts),
+    reading: reading(opts.mode, pool.benign),
+  };
   const report: Report = {
     provenance: {
       run_id: opts.runId,
@@ -106,7 +128,10 @@ export async function runEvals(opts: RunOptions): Promise<RunOutput> {
         records.filter((r) => r.scenario === s.id),
       ),
     ),
-    pooled: pooled(records),
+    pooled: pool,
+    comparison,
+    providers: providerStats(records),
+    floor_leaks: floorLeakSummary(records),
     failures: failuresOf(records),
     sessions: records
       .slice()
@@ -120,6 +145,22 @@ export async function runEvals(opts: RunOptions): Promise<RunOutput> {
 export function writeReport(dir: string, report: Report): void {
   writeFileSync(join(dir, 'report.json'), JSON.stringify(report, null, 2) + '\n');
   writeFileSync(join(dir, 'REPORT.md'), renderMarkdown(report));
+}
+
+/** The baseline run's executed benign economics, if that run's report exists. */
+function baselineOf(opts: RunOptions): Pick<Comparison, 'baseline'> {
+  if (!opts.baseline) return {};
+  const path = join(opts.runsDir, opts.baseline, 'report.json');
+  if (!existsSync(path)) throw new Error(`baseline run ${opts.baseline} has no report at ${path}`);
+  const base = JSON.parse(readFileSync(path, 'utf8')) as Report;
+  if (!base.pooled.benign) return {};
+  return {
+    baseline: {
+      run_id: base.provenance.run_id,
+      mode: base.provenance.mode,
+      economics: base.pooled.benign.llm,
+    },
+  };
 }
 
 function gitCommit(): string | null {

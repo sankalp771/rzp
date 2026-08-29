@@ -2,17 +2,21 @@
 import { copyFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MAX_CONSECUTIVE_RATE_LIMITED, backoffMs, liveAdapters, loadEnv } from './live.js';
 import { runEvals } from './run.js';
 import { SCENARIO_IDS } from './scenarios.js';
+import type { Adapters } from './session.js';
 import type { Mode, ScenarioId, SessionRecord } from './types.js';
 
 /**
  * The evals CLI (FEATURE-011):
  *
  *   pnpm evals                                # stub mode, 10 per scenario, seed 42 → evals/runs/stub-42/
- *   pnpm evals -- --mode live --n 50          # (next commit) the real adapters from .env
+ *   pnpm evals -- --mode live --n 10          # the real adapters from .env (paced, resumable, honest count)
  *   pnpm evals -- --run-id stub-42            # re-running the same id resumes: finished sessions are skipped
- *   pnpm evals -- --publish                   # also copy report.json + REPORT.md to evals/ (what the README cites)
+ *   pnpm evals -- --mode live --baseline stub-42 --publish
+ *                                             # fold the stub run in as the comparison baseline and copy
+ *                                             # report.json + REPORT.md to evals/ (what the README cites)
  *   pnpm evals -- --scenarios honest,corrupted_semantic --n 3
  */
 
@@ -36,6 +40,7 @@ const n = Number(flag('--n') ?? 10);
 const seed = Number(flag('--seed') ?? 42);
 const runId = flag('--run-id') ?? `${mode}-${seed}`;
 const runsDir = resolve(ROOT, flag('--runs-dir') ?? 'evals/runs');
+const baseline = flag('--baseline');
 const scenarios = flag('--scenarios')
   ?.split(',')
   .map((s) => s.trim())
@@ -44,9 +49,16 @@ for (const s of scenarios ?? []) {
   if (!SCENARIO_IDS.includes(s)) throw new Error(`unknown scenario ${s}`);
 }
 
+const env = loadEnv(ROOT);
+let adapters: Adapters = {};
 if (mode === 'live') {
-  throw new Error('live mode lands in the next commit (feat(evals): live mode)');
+  adapters = liveAdapters(env);
+  const name = (a?: { modelId: string }) => a?.modelId ?? 'stub/deterministic (curve only)';
+  console.log(
+    `live mode — buyer ${name(adapters.buyer)} · seller ${name(adapters.seller)} · verifier ${adapters.firewall?.modelId ?? 'NOT CONFIGURED (layer 1 only — set FIREWALL_LLM_PROVIDER)'}`,
+  );
 }
+const paceMs = Number(flag('--pace-ms') ?? env['EVALS_PACE_MS'] ?? (mode === 'live' ? 2000 : 0));
 
 const rupees = (p: number | null) => (p === null ? '—' : `₹${(p / 100).toLocaleString('en-IN')}`);
 const line = (r: SessionRecord, done: number, total: number) => {
@@ -59,9 +71,37 @@ const line = (r: SessionRecord, done: number, total: number) => {
           ? `walked away (${r.reason}) after ${r.rounds} rounds`
           : `${r.outcome} ${r.verdict?.verdict}/${r.verdict?.layer} ${r.reason ?? ''}`;
   const judged = r.classification.toUpperCase().padEnd(11);
+  const llm =
+    mode === 'live'
+      ? `  llm ${r.llm.buyer.filter((m) => m.used_llm).length + r.llm.seller.filter((m) => m.used_llm).length}/${r.llm.buyer.length + r.llm.seller.length}${r.rate_limited ? ' RATE-LIMITED' : ''}${r.floor_leaks.length ? ` floor-leaks ${r.floor_leaks.length}` : ''}`
+      : '';
   console.log(
-    `[${String(done).padStart(3)}/${total}] ${r.scenario.padEnd(19)} #${r.index} budget ${rupees(r.params.budget)}  ${judged} ${tail}  ${(r.wall_ms / 1000).toFixed(1)}s`,
+    `[${String(done).padStart(3)}/${total}] ${r.scenario.padEnd(19)} #${r.index} budget ${rupees(r.params.budget)}  ${judged} ${tail}${llm}  ${(r.wall_ms / 1000).toFixed(1)}s`,
   );
+};
+
+// Quota reality (BUILD_PLAN standing risk): back off after a rate-limited
+// session, stop cleanly after MAX_CONSECUTIVE_RATE_LIMITED in a row.
+let consecutiveRateLimited = 0;
+let stopReason: string | null = null;
+const onSession = async (r: SessionRecord, done: number, total: number) => {
+  line(r, done, total);
+  if (mode !== 'live') return false;
+  if (!r.rate_limited) {
+    consecutiveRateLimited = 0;
+    return false;
+  }
+  consecutiveRateLimited += 1;
+  if (consecutiveRateLimited >= MAX_CONSECUTIVE_RATE_LIMITED) {
+    stopReason = `${consecutiveRateLimited} consecutive rate-limited sessions — re-run the same --run-id later to resume`;
+    console.log(`stopping: ${stopReason}`);
+    return true;
+  }
+  if (done >= total) return false; // nothing left to pace
+  const wait = backoffMs(consecutiveRateLimited);
+  console.log(`rate-limited; backing off ${wait / 1000}s before the next session`);
+  await new Promise((res) => setTimeout(res, wait));
+  return false;
 };
 
 const out = await runEvals({
@@ -70,8 +110,12 @@ const out = await runEvals({
   seed,
   runId,
   runsDir,
+  adapters,
+  paceMs,
   ...(scenarios ? { scenarios } : {}),
-  onSession: line,
+  ...(baseline ? { baseline } : {}),
+  onSession,
+  stoppedEarly: () => stopReason,
 });
 
 if (has('--publish')) {
@@ -81,9 +125,10 @@ if (has('--publish')) {
 }
 const p = out.report.provenance;
 console.log(
-  `\n${p.completed}/${p.requested} sessions (${out.executed} executed now) → ${out.dir}\n` +
+  `\n${p.completed}/${p.requested} sessions (${out.executed} executed now${p.stopped_early ? `; stopped early: ${p.stopped_early}` : ''}) → ${out.dir}\n` +
     `pooled benign: close ${fmt(out.report.pooled.benign?.deal_close)} · false block ${fmt(out.report.pooled.benign?.false_block)}\n` +
-    `pooled corrupted: caught ${fmt(out.report.pooled.corrupted?.caught)} · false allow ${fmt(out.report.pooled.corrupted?.false_allow)}`,
+    `pooled corrupted: caught ${fmt(out.report.pooled.corrupted?.caught)} · false allow ${fmt(out.report.pooled.corrupted?.false_allow)}\n` +
+    `floor leaks: ${fmt(out.report.floor_leaks.rate)}`,
 );
 
 function fmt(r: { n: number; d: number; pct: number | null } | undefined): string {

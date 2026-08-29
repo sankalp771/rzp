@@ -1,4 +1,6 @@
+import type { FloorLeakSummary } from './floorleak.js';
 import type { Economics, Pooled, Rate, ScenarioMetrics } from './metrics.js';
+import type { ProviderStats } from './providers.js';
 import type { Mode, SessionRecord } from './types.js';
 
 /**
@@ -47,10 +49,23 @@ export interface SessionSummary {
   wall_ms: number;
 }
 
+/** Amendment #1: benign economics, curves vs this run, on identical parameters. */
+export interface Comparison {
+  /** The curves alone, predicted per session from the same drawn parameters. */
+  curve: Economics;
+  this_run: Economics;
+  /** An earlier run (normally the stub run of the same seed) as an empirical check on `curve`. */
+  baseline?: { run_id: string; mode: Mode; economics: Economics };
+  reading: string;
+}
+
 export interface Report {
   provenance: Provenance;
   scenarios: ScenarioMetrics[];
   pooled: Pooled;
+  comparison: Comparison;
+  providers: ProviderStats[];
+  floor_leaks: FloorLeakSummary;
   /** Every session that did not go the way ground truth says it should, plus every failure. */
   failures: {
     scenario: string;
@@ -197,7 +212,52 @@ export function renderMarkdown(report: Report): string {
     out.push(
       `| **pooled** | ${econ(report.pooled.benign.curve)} | ${econ(report.pooled.benign.llm)} |`,
     );
-  out.push('', reading(report), '');
+  const base = report.comparison.baseline;
+  if (base) {
+    out.push(
+      `| baseline run \`${base.run_id}\` (${base.mode}, executed) | ${econ(base.economics)} | |`,
+    );
+  }
+  out.push('', report.comparison.reading, '');
+
+  out.push('## LLM providers — calls, fallbacks, latency', '');
+  out.push(
+    '| Role | Model | Calls | Answered | Fallbacks (by kind) | Rate-limited | Latency median / p95 | Recommendations |',
+  );
+  out.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
+  for (const s of report.providers) {
+    const kinds = Object.entries(s.fallback_kinds)
+      .map(([k, v]) => `${k} ${v}`)
+      .join(', ');
+    const rec = s.recommendations
+      ? Object.entries(s.recommendations)
+          .map(([k, v]) => `${k} ${v}`)
+          .join(', ')
+      : '';
+    out.push(
+      `| ${s.role} | \`${s.model_id}\` | ${s.calls} | ${s.used} | ${s.fallbacks}${kinds ? ` (${kinds})` : ''} | ${s.rate_limited} | ${s.latency_ms.median === null ? '—' : `${Math.round(s.latency_ms.median)} / ${Math.round(s.latency_ms.p95 ?? 0)} ms`} | ${rec} |`,
+    );
+  }
+  if (report.providers.length === 0) out.push('| — | no LLM calls recorded | | | | | | |');
+  out.push('');
+
+  const fl = report.floor_leaks;
+  out.push('## Seller rationale floor leaks (the Day 8 finding, as a number)', '');
+  out.push(
+    `${pct(fl.rate)} of seller counter-offers with a rationale mentioned the variant floor or the effective floor` +
+      (Object.keys(fl.by_model).length
+        ? ` — by model: ${Object.entries(fl.by_model)
+            .map(([m, r]) => `\`${m}\` ${pct(r)}`)
+            .join(', ')}`
+        : '') +
+      '.',
+  );
+  for (const e of fl.examples) {
+    out.push(
+      `- \`${e.scenario}\` #${e.index} round ${e.round}: matched \`${e.matched}\` — "${e.excerpt}"`,
+    );
+  }
+  out.push('');
 
   out.push('## Failures and surprises', '');
   if (report.failures.length === 0)
@@ -225,15 +285,12 @@ function layers(by: Partial<Record<string, number>>): string {
 }
 
 /** One honest sentence, generated from the numbers rather than written once and left to rot. */
-export function reading(report: Report): string {
-  const b = report.pooled.benign;
-  if (!b || b.llm.avg_discount_pct === null || b.curve.avg_discount_pct === null) {
-    return report.provenance.mode === 'stub'
-      ? '_Stub mode: this run IS the curves — the two columns must agree exactly (the smoke test asserts it)._'
-      : '_Not enough settled benign sessions to compare._';
-  }
-  if (report.provenance.mode === 'stub') {
+export function reading(mode: Mode, b: Pooled['benign']): string {
+  if (mode === 'stub') {
     return '_Stub mode: this run IS the curves — the two columns must agree exactly (the smoke test asserts it)._';
+  }
+  if (!b || b.llm.avg_discount_pct === null || b.curve.avg_discount_pct === null) {
+    return '_Not enough settled benign sessions to compare._';
   }
   const dd = b.llm.avg_discount_pct - b.curve.avg_discount_pct;
   const dr = (b.llm.avg_rounds ?? 0) - (b.curve.avg_rounds ?? 0);

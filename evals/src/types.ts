@@ -97,6 +97,16 @@ export interface TranscriptRow {
   verifier_summary?: string;
 }
 
+/** A seller counter-offer rationale that mentioned a floor (amendment #3). */
+export interface FloorLeak {
+  round: number;
+  /** Which floor leaked: the variant's absolute floor or the policy's effective floor. */
+  floor: number;
+  /** The spelling that matched. */
+  matched: string;
+  excerpt: string;
+}
+
 export interface SessionRecord {
   run_id: string;
   mode: Mode;
@@ -122,6 +132,9 @@ export interface SessionRecord {
   escalated: boolean;
   curve: CurvePrediction | null;
   llm: { buyer: MoveRow[]; seller: MoveRow[]; verifier: VerifierRow | null };
+  floor_leaks: FloorLeak[];
+  /** Some call in this session failed on a provider rate limit (live pacing reads this). */
+  rate_limited: boolean;
   transcript: TranscriptRow[];
   notes: string[];
   /** Real wall-clock instant the session finished (provenance, not protocol time). */
