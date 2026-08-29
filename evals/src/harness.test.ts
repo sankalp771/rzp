@@ -201,7 +201,19 @@ describe('stub run — N=2 per scenario over the real in-process stack', () => {
   it('re-running the same run id resumes: nothing executes, the report still counts 10', async () => {
     const again = await runEvals({ mode: 'stub', n: 2, seed: 42, runId: 'smoke', runsDir });
     expect(again.executed).toBe(0);
-    expect(again.report.provenance).toMatchObject({ completed: 10, executed_now: 0 });
+    // A re-render keeps the provenance of the run that produced the data.
+    expect(again.report.provenance).toMatchObject({ completed: 10, executed_now: 10 });
+    // --report-only never executes, even when sessions are missing.
+    const rendered = await runEvals({
+      mode: 'stub',
+      n: 10,
+      seed: 42,
+      runId: 'smoke',
+      runsDir,
+      reportOnly: true,
+    });
+    expect(rendered.executed).toBe(0);
+    expect(rendered.report.provenance).toMatchObject({ requested: 50, completed: 10 });
     // Growing N resumes too: only the new indices run.
     const grown = await runEvals({
       mode: 'stub',

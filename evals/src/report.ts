@@ -122,7 +122,9 @@ export function failuresOf(records: SessionRecord[]): Report['failures'] {
 const pct = (r: Rate) => (r.pct === null ? `— (0/0)` : `${r.pct}% (${r.n}/${r.d})`);
 const num = (x: number | null, digits = 1) => (x === null ? '—' : x.toFixed(digits));
 const rupees = (p: number | null) =>
-  p === null ? '—' : `₹${(p / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
+  p === null
+    ? '—'
+    : `₹${(Math.round(p) / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const econ = (e: Economics) =>
   `${e.settled} settled · avg ${num(e.avg_discount_pct)}% below list · avg ${num(e.avg_rounds)} rounds · avg ${rupees(e.avg_settled_total)}`;
 

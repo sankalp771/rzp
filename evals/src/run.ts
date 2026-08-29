@@ -46,6 +46,8 @@ export interface RunOptions {
   stoppedEarly?: () => string | null;
   /** Operator notes for provenance (how the run was conducted). Appended to any notes already on disk. */
   notes?: string[];
+  /** Re-render the report from what is on disk; execute nothing (a resume would run the missing sessions). */
+  reportOnly?: boolean;
 }
 
 export interface RunOutput {
@@ -73,6 +75,7 @@ export async function runEvals(opts: RunOptions): Promise<RunOutput> {
 
   outer: for (const scenario of scenarios) {
     for (let index = 0; index < opts.n; index++) {
+      if (opts.reportOnly) break outer;
       if (done.has(RunStore.key({ scenario: scenario.id, index }))) continue;
       const record = await runSession({
         runId: opts.runId,
@@ -102,31 +105,39 @@ export async function runEvals(opts: RunOptions): Promise<RunOutput> {
     ...baselineOf(opts),
     reading: reading(opts.mode, pool.benign),
   };
+  // A re-render (nothing executed) describes the run that produced the
+  // data, so it keeps that run's provenance — commit, models, clock, wall
+  // time — instead of stamping a new one.
+  const prior = executed === 0 ? priorProvenance(dir) : null;
   const report: Report = {
-    provenance: {
-      run_id: opts.runId,
-      mode: opts.mode,
-      seed: opts.seed,
-      n_per_scenario: opts.n,
-      requested: total,
-      completed: records.length,
-      executed_now: executed,
-      git_commit: gitCommit(),
-      models: {
-        buyer: adapters.buyer?.modelId ?? 'stub/deterministic',
-        seller: adapters.seller?.modelId ?? 'stub/deterministic',
-        verifier: adapters.firewall?.modelId ?? 'not_configured (layer 1 only)',
-      },
-      clock,
-      settlement:
-        'simulated (in-process SimulatedRazorpayClient; the live Razorpay leg was proven by Gate 4 on Day 7)',
-      started_at: startedAt.toISOString(),
-      finished_at: new Date().toISOString(),
-      wall_ms: Date.now() - startedAt.getTime(),
-      stopped_early: stopped,
-      node: process.version,
-      notes,
-    },
+    // Counts always come from what is on disk (an interrupted invocation
+    // may have appended sessions after its last report was written).
+    provenance: prior
+      ? { ...prior, requested: total, completed: records.length, notes }
+      : {
+          run_id: opts.runId,
+          mode: opts.mode,
+          seed: opts.seed,
+          n_per_scenario: opts.n,
+          requested: total,
+          completed: records.length,
+          executed_now: executed,
+          git_commit: gitCommit(),
+          models: {
+            buyer: adapters.buyer?.modelId ?? 'stub/deterministic',
+            seller: adapters.seller?.modelId ?? 'stub/deterministic',
+            verifier: adapters.firewall?.modelId ?? 'not_configured (layer 1 only)',
+          },
+          clock,
+          settlement:
+            'simulated (in-process SimulatedRazorpayClient; the live Razorpay leg was proven by Gate 4 on Day 7)',
+          started_at: startedAt.toISOString(),
+          finished_at: new Date().toISOString(),
+          wall_ms: Date.now() - startedAt.getTime(),
+          stopped_early: stopped,
+          node: process.version,
+          notes,
+        },
     scenarios: scenarios.map((s) =>
       scenarioMetrics(
         s,
@@ -169,14 +180,18 @@ function baselineOf(opts: RunOptions): Pick<Comparison, 'baseline'> {
   };
 }
 
-function priorNotes(dir: string): string[] {
+function priorProvenance(dir: string): Report['provenance'] | null {
   const path = join(dir, 'report.json');
-  if (!existsSync(path)) return [];
+  if (!existsSync(path)) return null;
   try {
-    return (JSON.parse(readFileSync(path, 'utf8')) as Report).provenance.notes ?? [];
+    return (JSON.parse(readFileSync(path, 'utf8')) as Report).provenance;
   } catch {
-    return [];
+    return null;
   }
+}
+
+function priorNotes(dir: string): string[] {
+  return priorProvenance(dir)?.notes ?? [];
 }
 
 function gitCommit(): string | null {

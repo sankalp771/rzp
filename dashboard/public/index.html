@@ -288,7 +288,12 @@
 
     <script>
       const $ = (id) => document.getElementById(id);
-      const rupees = (p) => '₹' + (p / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 });
+      const rupees = (p) =>
+        '₹' +
+        (Math.round(p) / 100).toLocaleString('en-IN', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        });
       const short = (h) => String(h).slice(0, 12) + '…';
       const esc = (s) =>
         String(s).replace(

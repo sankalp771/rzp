@@ -19,6 +19,8 @@ import type { Mode, ScenarioId, SessionRecord } from './types.js';
  *                                             # fold the stub run in as the comparison baseline and copy
  *                                             # report.json + REPORT.md to evals/ (what the README cites)
  *   pnpm evals -- --scenarios honest,corrupted_semantic --n 3
+ *   pnpm evals -- --mode live --run-id live-42 --report-only
+ *                                             # re-render a run's report from disk; executes nothing
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -134,6 +136,9 @@ const out = await runEvals({
   onSession,
   stoppedEarly: () => stopReason,
   notes,
+  // --report-only: re-render from sessions.jsonl, never execute (a bare
+  // re-run of a truncated run id would resume it).
+  reportOnly: has('--report-only'),
 });
 
 if (has('--publish')) {
