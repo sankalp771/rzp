@@ -44,6 +44,8 @@ export interface RunOptions {
   ) => boolean | void | Promise<boolean | void>;
   /** Asked once when a stop happens; carried into provenance. */
   stoppedEarly?: () => string | null;
+  /** Operator notes for provenance (how the run was conducted). Appended to any notes already on disk. */
+  notes?: string[];
 }
 
 export interface RunOutput {
@@ -60,6 +62,9 @@ export async function runEvals(opts: RunOptions): Promise<RunOutput> {
   const store = new RunStore(dir);
   const records = store.load();
   const done = new Set(records.map(RunStore.key));
+  // Notes accumulate across resumed invocations: what an earlier invocation
+  // said about itself stays on the record.
+  const notes = [...priorNotes(dir), ...(opts.notes ?? [])];
   const total = scenarios.length * opts.n;
   const adapters = opts.adapters ?? {};
   const clock = opts.clock ?? (opts.mode === 'live' ? 'real' : 'frozen');
@@ -120,6 +125,7 @@ export async function runEvals(opts: RunOptions): Promise<RunOutput> {
       wall_ms: Date.now() - startedAt.getTime(),
       stopped_early: stopped,
       node: process.version,
+      notes,
     },
     scenarios: scenarios.map((s) =>
       scenarioMetrics(
@@ -161,6 +167,16 @@ function baselineOf(opts: RunOptions): Pick<Comparison, 'baseline'> {
       economics: base.pooled.benign.llm,
     },
   };
+}
+
+function priorNotes(dir: string): string[] {
+  const path = join(dir, 'report.json');
+  if (!existsSync(path)) return [];
+  try {
+    return (JSON.parse(readFileSync(path, 'utf8')) as Report).provenance.notes ?? [];
+  } catch {
+    return [];
+  }
 }
 
 function gitCommit(): string | null {

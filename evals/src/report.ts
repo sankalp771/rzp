@@ -29,6 +29,8 @@ export interface Provenance {
   wall_ms: number;
   stopped_early: string | null;
   node: string;
+  /** Operator notes about how the run was conducted (e.g. retry budget overrides) — part of the record. */
+  notes: string[];
 }
 
 export interface SessionSummary {
@@ -145,6 +147,7 @@ export function renderMarkdown(report: Report): string {
   out.push(
     `- started ${p.started_at} · finished ${p.finished_at} · wall ${(p.wall_ms / 1000).toFixed(1)} s (${p.executed_now} executed in this invocation, ${p.completed - p.executed_now} resumed from disk)`,
   );
+  for (const n of p.notes) out.push(`- note: ${n}`);
   out.push('');
 
   out.push('## Benign scenarios — negotiation quality and the false-block rate', '');

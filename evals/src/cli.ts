@@ -59,6 +59,20 @@ if (mode === 'live') {
   );
 }
 const paceMs = Number(flag('--pace-ms') ?? env['EVALS_PACE_MS'] ?? (mode === 'live' ? 2000 : 0));
+// Provenance notes: an explicit --note, plus the adapter retry budget whenever
+// it is overridden (the in-process harness has no 30 s HTTP window, so a
+// wider budget lets a rate-limited call retry instead of falling back).
+const notes: string[] = [];
+if (flag('--note')) notes.push(flag('--note')!);
+const budgetKeys = ['LLM_TOTAL_BUDGET_MS', 'LLM_MAX_ATTEMPTS', 'LLM_CALL_TIMEOUT_MS'] as const;
+if (mode === 'live' && budgetKeys.some((k) => process.env[k])) {
+  notes.push(
+    `sessions executed in this invocation ran with ${budgetKeys
+      .filter((k) => process.env[k])
+      .map((k) => `${k}=${process.env[k]}`)
+      .join(' ')} (adapter retry budget override; default 12000 ms / 3 attempts)`,
+  );
+}
 
 const rupees = (p: number | null) => (p === null ? '—' : `₹${(p / 100).toLocaleString('en-IN')}`);
 const line = (r: SessionRecord, done: number, total: number) => {
@@ -116,6 +130,7 @@ const out = await runEvals({
   ...(baseline ? { baseline } : {}),
   onSession,
   stoppedEarly: () => stopReason,
+  notes,
 });
 
 if (has('--publish')) {
