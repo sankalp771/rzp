@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { MAX_CONSECUTIVE_RATE_LIMITED, backoffMs, liveAdapters, loadEnv } from './live.js';
 import { runEvals } from './run.js';
 import { SCENARIO_IDS } from './scenarios.js';
+import { sessionOutage } from './providers.js';
 import type { Adapters } from './session.js';
 import type { Mode, ScenarioId, SessionRecord } from './types.js';
 
@@ -101,13 +102,15 @@ let stopReason: string | null = null;
 const onSession = async (r: SessionRecord, done: number, total: number) => {
   line(r, done, total);
   if (mode !== 'live') return false;
-  if (!r.rate_limited) {
+  const outage = sessionOutage(r.llm);
+  if (outage) console.log('every LLM call in that session failed on transport — network outage?');
+  if (!r.rate_limited && !outage) {
     consecutiveRateLimited = 0;
     return false;
   }
   consecutiveRateLimited += 1;
   if (consecutiveRateLimited >= MAX_CONSECUTIVE_RATE_LIMITED) {
-    stopReason = `${consecutiveRateLimited} consecutive rate-limited sessions — re-run the same --run-id later to resume`;
+    stopReason = `${consecutiveRateLimited} consecutive ${outage ? 'transport-failed' : 'rate-limited'} sessions — re-run the same --run-id later to resume`;
     console.log(`stopping: ${stopReason}`);
     return true;
   }

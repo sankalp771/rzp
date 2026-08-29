@@ -47,6 +47,25 @@ export function sessionRateLimited(llm: SessionRecord['llm']): boolean {
   );
 }
 
+/**
+ * Every LLM call in the session failed on transport (network/timeout) —
+ * the machine lost the providers, not the providers the machine. Pacing
+ * treats it like a rate limit: back off, then stop rather than record
+ * sessions that measure nothing.
+ */
+export function sessionOutage(llm: SessionRecord['llm']): boolean {
+  const moves = [...llm.buyer, ...llm.seller];
+  const verifierFailed = llm.verifier !== null && !llm.verifier.used_llm;
+  const calls = moves.length + (llm.verifier ? 1 : 0);
+  if (calls === 0) return false;
+  const failedTransport = (reason: string | null | undefined) =>
+    ['network', 'timeout'].includes(fallbackKind(reason));
+  return (
+    moves.every((m) => !m.used_llm && failedTransport(m.fallback_reason)) &&
+    (llm.verifier === null || (verifierFailed && failedTransport(llm.verifier.failure_reason)))
+  );
+}
+
 export function percentile(xs: number[], p: number): number | null {
   if (xs.length === 0) return null;
   const sorted = [...xs].sort((a, b) => a - b);

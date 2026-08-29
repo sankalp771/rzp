@@ -11,7 +11,7 @@ import {
 import { describe, expect, it } from 'vitest';
 import { detectFloorLeaks, findFloorMention, floorRenderings } from './floorleak.js';
 import { backoffMs } from './live.js';
-import { fallbackKind, percentile, sessionRateLimited } from './providers.js';
+import { fallbackKind, percentile, sessionOutage, sessionRateLimited } from './providers.js';
 import { runEvals } from './run.js';
 
 /**
@@ -85,6 +85,29 @@ describe('provider stats', () => {
     expect(percentile([], 50)).toBeNull();
     expect(percentile([5, 1, 3], 50)).toBe(3);
     expect(percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 95)).toBe(10);
+  });
+  it('an outage is every call failing on transport, not a model answering badly', () => {
+    const net = (n: number) => ({
+      round: n,
+      model_id: 'm',
+      used_llm: false,
+      fallback_reason: `network: attempt 6: TypeError: fetch failed`,
+      latency_ms: 0,
+    });
+    const ok = { round: 1, model_id: 'm', used_llm: true, fallback_reason: null, latency_ms: 5 };
+    const absent = { model_id: 'v', used_llm: false, latency_ms: 0, failure_reason: 'network: x' };
+    expect(sessionOutage({ buyer: [net(1), net(2)], seller: [net(1)], verifier: absent })).toBe(
+      true,
+    );
+    expect(sessionOutage({ buyer: [net(1), ok], seller: [net(1)], verifier: null })).toBe(false);
+    expect(sessionOutage({ buyer: [], seller: [], verifier: null })).toBe(false);
+    expect(
+      sessionOutage({
+        buyer: [{ ...net(1), fallback_reason: 'unparseable proposal' }],
+        seller: [],
+        verifier: null,
+      }),
+    ).toBe(false);
   });
   it('backoff doubles per consecutive rate-limited session', () => {
     expect([1, 2, 3].map((n) => backoffMs(n, 30_000))).toEqual([30_000, 60_000, 120_000]);
