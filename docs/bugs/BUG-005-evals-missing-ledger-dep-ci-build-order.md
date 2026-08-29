@@ -90,8 +90,8 @@
         Tests  348 passed | 6 skipped (354)
   ```
 
-  CI on the fix commit: see the HANDOVER entry of the same date for the
-  run id and verdict (this file is written before that run exists).
+  CI on the fix commit `51fd5d2`: run `33260024384`, `test: success`,
+  `compose: success`. `known-good-4` now points at `51fd5d2`.
 
 ## Outcome
 - **Status:** fixed

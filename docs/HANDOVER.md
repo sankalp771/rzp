@@ -158,11 +158,11 @@ Format — exactly five lines plus header:
   `dist/` was scrubbed first; any future package that typechecks another
   package's source must declare every dep that source imports. The
   Day 11 close was pushed without waiting for CI — that is now a Gate 0
-  line. The fix commit's CI run id and verdict are recorded in the next
-  handoff entry (this one is written before that run exists).
+  line.
 - Tests: scrubbed-tree `pnpm install --frozen-lockfile`, `build`, `lint`,
   `typecheck` all exit 0; `pnpm test` 348 passed / 6 skipped (34 files
-  + 1 skipped) — same counts as the last green CI.
+  + 1 skipped). CI on the fix commit `51fd5d2`: run `33260024384`,
+  `test: success`, `compose: success`; `known-good-4` re-pointed there.
 - Decisions: D027.
 
 ### 2026-08-29 21:30 — [Claude Fable 5 (claude-fable-5)]
