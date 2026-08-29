@@ -58,7 +58,15 @@
 - Mitigation: deterministic bounds check on every outbound offer AFTER LLM
   generation; clamp/regenerate; bounds live server-side, never in the prompt
   alone.
-- Test:
+- Test: `merchant/strategy.test.ts` "clampUnitPrice (Gate 2 adversarial —
+  CONSTRAINTS #5)": "clamps a below-floor proposal up to the effective
+  floor", "clamps an above-list proposal down to list", "clamps a
+  non-integer proposal to list", "a below-floor LLM proposal is NEVER
+  emitted by decideSeller"; `buyer/e2e.test.ts` "CHAOS: garbage LLM
+  proposals every round on BOTH sides → the chain still completes with
+  every price in bounds" (Gate 2). Measured, not only asserted: the evals'
+  seller floor-leak rate (`evals/REPORT.md`, FEATURE-011) counts how often
+  the seller's rationale still names the floor it cannot cross.
 
 ### T4 — Prompt injection via catalog or offer free-text against the buyer
 - Attack: merchant embeds instructions in product descriptions ("ignore your
@@ -78,8 +86,10 @@
 - Test: `firewall/intent.test.ts` "fences the principal text and the
   seller text, and neutralises fence spoofing"; "refuses …" (strict
   parse); `firewall/verdict.test.ts` "exhaustive: no layer-2 input yields
-  allow unless it is a clean allow" (Gate 3 item 5). Buyer-side: (planned,
-  Gate 2).
+  allow unless it is a clean allow" (Gate 3 item 5). Buyer-side:
+  `buyer/llm.test.ts` "a hijacked model proposing to pay 10× list is
+  clamped to the reservation; rationale ships"; `buyer/strategy.test.ts`
+  "a proposal above the reservation is clamped down to it" (Gate 2).
 
 ### T5 — Intent drift / corrupted buyer goal (flagship scenario)
 - Attack: buyer agent state corrupted; cart no longer matches the mandate.
@@ -135,19 +145,38 @@
 - Attack/failure: network flaps cause repeated order creation.
 - Mitigation: idempotency keys; bounded retry with backoff; each attempt
   ledger-logged.
-- Test:
+- Test: `settlement/app.test.ts` "idempotency: a second request for the
+  same cart is acknowledged and creates NO second order"; "retry:
+  transient failures back off and succeed within the ceiling (F4)";
+  "retry: stops at the ceiling → failed receipt with
+  SETTLEMENT_RETRY_EXHAUSTED"; "a non-retryable 4xx fails fast without
+  exhausting the ceiling"; `settlement/razorpay.test.ts`
+  "RazorpayError.retryable: 429/5xx/network yes, 4xx no" (Gate 4).
 
 ### T8 — Webhook forgery
 - Attack: forged "payment confirmed" webhook triggers a receipt.
 - Mitigation: Razorpay webhook signature verification before any state change.
-- Test:
+- Test: `settlement/webhook.test.ts` "accepts the HMAC-SHA256 of the raw
+  body"; "rejects a wrong secret, a tampered body, a missing header, and
+  an empty secret"; `settlement/app.test.ts` "webhook with an invalid
+  signature → 401 and mutates nothing"; "a validly signed webhook for a
+  wrong amount is ignored, not applied"; "refuses PAYMENT_SIMULATION
+  without a webhook secret" (Gate 4).
 
 ### T9 — Key compromise of an agent
 - Attack: stolen agent key signs fraudulent messages.
 - Mitigation (scoped honestly): per-session keys limit blast radius; velocity
   limits at the firewall cap damage; full revocation/rotation documented as
   out of scope for the buildathon window.
-- Test:
+- Test: per-session keys — `firewall/app.test.ts` "verifies the
+  principal signature, pins the buyer key, acks with the ref; repeat is
+  idempotent"; `buyer/e2e.test.ts` "one mandate, one purchase: a second
+  run on the same fixed mandate is refused at registration
+  (MANDATE_CONFLICT)" (a fresh session key cannot re-bind a used
+  mandate). Velocity — `firewall/policy.test.ts` "VELOCITY_LIMIT: 9
+  recent allows pass, 10 block (max 10) — keyed per principal";
+  `firewall/app.test.ts` "velocity is per principal across fresh
+  mandates: max 1 → the second principal cart blocks" (Gate 3).
 
 ### T10 — Escalation-queue starvation (and: racing the human)
 - Attack/failure: escalated settlements pile up unanswered, holding funds

@@ -7,8 +7,8 @@
 
 Built for the Razorpay AI Buildathon, Track 1: AI Growth & Agentic Commerce.
 
-**Status:** Day 9 of 13 — **both firewall layers and the human in the
-loop.** Done: ACNP v0.1 spec + protocol library (signatures, schemas,
+**Status:** Day 11 of 13 — **feature freeze + the evals score sheet**
+(see [Metrics](#metrics--evals-run-live-42-mistral)). Done: ACNP v0.1 spec + protocol library (signatures, schemas,
 replay guard) + merchant server (catalog, policy bounds engine,
 deterministic negotiation) + buyer agent (mandate registration,
 deterministic strategy, budget clamp, signed cart) + LLM adapter layer
@@ -39,8 +39,11 @@ every decision and state change; settlement's money chain absorbed
 verbatim) with a verify routine that names the first broken entry, and a
 thin operator console on `http://localhost:4005` (run, approval queue,
 policy, session replay with all four chains verified + cross-party
-envelope match, evals). Days 11–13: evals, polish, video, submission —
-see [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
+envelope match, evals). **Day 11:** the evals harness ran the whole
+system 50 times, twice — deterministic curves alone, then the real
+models on the same seed — and the failure numbers are in the table below
+(FEATURE-011, [docs/EVALS.md](docs/EVALS.md)). Days 12–13: polish, video,
+submission — see [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
 
 ## Quickstart
 
@@ -83,8 +86,50 @@ pnpm build && pnpm lint && pnpm typecheck && pnpm test
 - [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) — trust boundaries and attack cases
 - [docs/DECISIONS.md](docs/DECISIONS.md) — why, not just what
 
-Sections to come as they are built: architecture diagram, protocol summary,
-metrics table.
+## Metrics — evals run `live-42-mistral`
+
+Copied from [evals/report.json](evals/report.json) (rendered in
+[evals/REPORT.md](evals/REPORT.md)); 50 sessions, executed 2026-08-29,
+commit `d8e5daa`. Buyer `mistral/mistral-small-latest`, seller
+`groq/openai/gpt-oss-120b`, intent-verifier `mistral/mistral-small-latest`.
+Settlement inside the evals is the in-process simulated client (the live
+Razorpay leg was proven separately, Gate 4). Every rate is `pct (n/d)`; the
+failure numbers sit in the same tables as the wins. Re-run with
+`pnpm evals -- --mode live --n 10 --seed 42 --baseline stub-42 --publish`.
+
+**Benign scenarios** (ground truth: settle or walk away cleanly; any block or hold is a false block)
+
+| Scenario          | Deal-close   | Walk-away   | False block | Avg discount | Avg rounds |
+| ----------------- | ------------ | ----------- | ----------- | ------------ | ---------- |
+| `honest`          | 100% (10/10) | 0% (0/10)   | 0% (0/10)   | 13.1%        | 4.5        |
+| `aggressive`      | 90% (9/10)   | 10% (1/10)  | 0% (0/10)   | 11.8%        | 4.8        |
+| `stingy_merchant` | 50% (5/10)   | 50% (5/10)  | 0% (0/10)   | 1.1%         | 5.0        |
+| **pooled**        | 80% (24/30)  | 20% (6/30)  | 0% (0/30)   | 10.1%        | 4.7        |
+
+**Corrupted scenarios** (ground truth: must be caught; a settle is a false allow)
+
+| Scenario             | Caught       | False allow | Caught by             |
+| -------------------- | ------------ | ----------- | --------------------- |
+| `corrupted_layer1`   | 100% (10/10) | 0% (0/10)   | layer 1 (policy) 10   |
+| `corrupted_semantic` | 100% (10/10) | 0% (0/10)   | layer 2 (verifier) 10 |
+| **pooled**           | 100% (20/20) | 0% (0/20)   | critical misses: 0    |
+
+**What the models cost, on identical parameters** — the curves alone would
+have closed 30/30 at an average 12.3% below list; the LLM-advised pair
+closed 24/30 at 10.1% (−2.1 points, 0.3 fewer rounds). Both agents were
+model-advised, so this measures the pair. Providers: 502 calls, 502
+answered, 0 fallbacks (median latency ≈ 1.0 s). **Seller floor leaks:**
+13.3% (27/203) of the seller's counter-offer rationales named the floor it
+cannot cross (the number can't leak; the prose does — a hardening target).
+
+The deterministic run of the same seed (`evals/runs/stub-42`) closes every
+benign deal exactly where the formulas predict, catches all ten relays at
+layer 1, and lets the corporate hamper through **10/10** — numbers alone
+cannot see intent; that row is why layer 2 exists. Two truncated live
+attempts are kept and not cited (`live-42`: Gemini buyer, 4/50 on quota;
+`live-42-lite-outage`: 12 sessions through a network outage) — D026.
+
+Sections to come: architecture diagram, protocol summary.
 
 ## License
 

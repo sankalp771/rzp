@@ -8,19 +8,21 @@ handoff entries scroll down.
 
 ## Current state (edit in place)
 
-**Phase:** Week 2, Day 10 done — **FEATURE FREEZE.** Every service keeps
-its own append-only hash-chained ledger (`packages/ledger`, D023) with
-`GET /ledger`, `/ledger/verify`, `/sessions` behind `DASHBOARD_TOKEN`
-(D024); settlement's money chain is absorbed verbatim; the dashboard
-(`:4005`, localhost only) runs demos, decides holds, edits policy and
-replays sessions over all four chains; `scripts/verify-ledgers.mjs` does
-the same from a terminal and verifies a copied DB offline; a pending run
-can be resumed. Live: benign run started through the proxy → real order
-`order_TUnHe99ozVTq8h`, four chains verified, 19/19 envelopes matched
-across parties; an out-of-band edit of entry 5 on a COPY → `CHAIN BROKEN
-at entry 5`; held cart approved through the proxy and resumed → real
-order `order_TUnPTn0mEsJkdl`. Tag `known-good-3`. Days 11–13 are evals,
-polish, video, submission — no new features.
+**Phase:** Week 2, Day 11 done — **feature freeze holds; the evals score
+sheet exists.** `pnpm evals` (FEATURE-011, D025/D026) runs 50 sessions
+over the in-process stack across five scenarios on a seed, in `stub`
+(curves only, CI-asserted against the closed-form formulas) and `live`
+(the three adapters from `.env`) modes; every rate is n/d; catches are
+attributed to the layer; each session carries its curve prediction so
+LLM-vs-curve is parameter-for-parameter; runs resume by id; the report
+(`evals/report.json` + `REPORT.md`, per-run under `evals/runs/`) is
+rendered by the dashboard's Evals tab (Compose bind-mounts `./evals`).
+Cited live run `live-42-mistral`: benign 24/30 closed, 0/30 false
+blocks; corrupted 20/20 caught (policy 10, intent_verifier 10), 0 false
+allows; LLM pair 10.1% vs curves 12.3% below list; Groq floor leaks
+13.3% (27/203). Stub run `stub-42`: curves exact, relay 10/10 caught,
+hamper 10/10 false allow (designed). The README table is copied from the
+artifact. Tag `known-good-4`. Days 12–13: polish, video, submission.
 **Done:** Docs system; stack decided (D006–D009); repo scaffold
 (FEATURE-001); ACNP spec + protocol library (FEATURE-002/003); merchant
 server (FEATURE-004); buyer agent (FEATURE-005, D014); LLM adapter layer
@@ -31,12 +33,19 @@ token-gated human queue decided exactly once + timeout sweep + buyer
 hold → pending + merchant human-verdict handling + `review.mjs` +
 `itm_corp_hamper` (FEATURE-009, D021/D022; spec: human-layer codes);
 per-service audit ledgers + operator API + dashboard + verify script +
-resume (FEATURE-010, D023/D024).
+resume (FEATURE-010, D023/D024); evals harness, two committed 50-session
+runs, report + dashboard tab, EVALS/THREAT_MODEL/README reconciled
+(FEATURE-011, D025/D026).
 **In progress:** — (feature freeze)
-**Broken / unverified:** The dashboard page itself has not been clicked
-by Claude — every call it makes (run, queue approve, sessions, four
-verifies) was driven through the proxy with curl; the user should open
-`:4005` once and read the Replay tab. A failed settlement dispatch is
+**Broken / unverified:** The cited live evals run has a **Mistral buyer**,
+not the demo's Gemini buyer — the Gemini key's free quota was exhausted
+for the day on every model (run `live-42` stopped at 4/50; kept, D026);
+re-run `pnpm evals -- --mode live --n 10 --seed 42 --run-id
+live-42-gemini --baseline stub-42 --publish` on a fresh quota day and
+cite both. The verifier and the buyer share a model in that run. The
+dashboard page itself has not been clicked by Claude (the new Evals tab
+included) — every call it makes was driven through the proxy with curl;
+the user should open `:4005` once and read the Replay and Evals tabs. A failed settlement dispatch is
 recorded (cart row + ledger `MESSAGE_OUT … delivery: failed`) but there is
 no re-dispatch (drop candidate #2, not built); in-flight settlements are
 not resumed after a settlement crash. The operator API is ONE token for
@@ -51,8 +60,9 @@ per provider on the drift fixtures. A prompt-injection trial against the
 verifier has not been run live (Day 11/12 candidate). The firewall
 cannot prove the seller produced a cart's snapshot (T1, v0.2). Razorpay
 order status stays `created` (simulated tap). Gemini 429s → curve
-fallbacks (2 today). The Groq seller quoted its floor in rationale twice
-more (hardening candidate). The corrupted Gemini buyer writes
+fallbacks (2 today). The Groq seller quotes its floor in 13.3% (27/203)
+of counter-offer rationales (evals number; hardening candidate: don't
+show the seller model its floor, or filter the rationale). The corrupted Gemini buyer writes
 "completely unsuitable" in its own rationale and buys anyway — the
 buyer's shortlist/strategy have no semantics by design (evals finding).
 `bundle_proposal` unhandled (cut candidate). Three LLM keys not rotated
@@ -127,6 +137,33 @@ Format — exactly five lines plus header:
 - Decisions: <"none" or pointer to DECISIONS.md entries added>
 
 <!-- entries begin below -->
+
+### 2026-08-29 21:30 — [Claude Fable 5 (claude-fable-5)]
+- Did: FEATURE-011 — `evals/` harness (five scenarios on a seed, one
+  fresh in-process stack per session, ground truth by scenario, layer
+  attribution, per-session curve oracle from the services' own curve
+  functions, JSONL resume, pacing + rate-limit/outage stop, floor-leak
+  detector, provider stats, curve-vs-LLM comparison with baseline,
+  provenance notes, `--report-only`); test-kit seams `buyerTuning` /
+  `merchantPolicy` + buyer `AppOptions.tuning`; dashboard Evals tab +
+  Compose mount; runs `stub-42` (50/50) and `live-42-mistral` (50/50)
+  published to `evals/report.json`; README metrics table; EVALS.md
+  rewritten; THREAT_MODEL T3/T4/T7/T8/T9 filled; FLOW F7; D025, D026.
+- Left: Gemini-buyer live run on a fresh quota day (`--run-id
+  live-42-gemini`); Day 12: README architecture diagram + protocol
+  summary, video, prompt-injection trial, floor-leak hardening decision.
+- Watch out: `TaskStop`/killing the `pnpm` wrapper does NOT kill the
+  `tsx` child — two aborted runs kept executing in the background and
+  appended sessions until found (truncated back; kill `node …cli.ts`
+  explicitly). A bare re-run of a truncated run id RESUMES it (executes
+  the missing sessions) — use `--report-only` to re-render. Gemini's
+  free quota exhausts on the key, not the model. In PowerShell quote
+  `--scenarios "a,b"`. Under Compose the dashboard reads
+  `/app/evals/report.json` via a read-only bind mount.
+- Tests: Gate 0 green (lint, typecheck, 347 + evals 20 + dashboard 4);
+  Gate 7 all three items (artifacts committed; README copied from the
+  artifact); stub run asserted against the closed-form curves.
+- Decisions: D025, D026.
 
 ### 2026-08-29 17:30 — [Claude Fable 5 (claude-fable-5)]
 - Did: Demo re-verification on a cold machine (Docker Desktop was down;

@@ -142,11 +142,17 @@ non-goals). Both money shots also run from the terminal
   variable; no secret ever committed.
 - **Deployment**: Docker Compose one-command spinup of all services, seeded
   demo catalog and merchant policy included.
-- **Evals harness**: runs N synthetic negotiations (target 50) across
-  scenario mixes (honest buyer, aggressive buyer, corrupted-goal buyer,
-  stingy merchant); reports deal-close rate, average discount conceded,
-  firewall catch rate, false-block rate. Failure numbers are reported, not
-  hidden.
+- **Evals harness** (`evals/`, FEATURE-011, FLOW F7): 50 sessions per run
+  across five scenarios (honest, aggressive, stingy merchant, corrupted
+  layer-1, corrupted semantic) over the in-process stack, twice — the
+  deterministic curves alone (`stub`) and the real adapters (`live`) on
+  the same seed. Reports deal-close rate, average discount conceded,
+  firewall catch rate **by layer**, false-block rate, false-allow rate,
+  escalation share, per-provider fallbacks/latency, seller floor leaks,
+  and the curve-vs-LLM economics side by side; every rate with its
+  numerator/denominator. Failure numbers are reported, not hidden; the
+  artifacts (`evals/report.json`, `evals/REPORT.md`,
+  `evals/runs/<run-id>/sessions.jsonl`) are committed from executed runs.
 - **Tests in CI**: at minimum one full happy-path negotiation-to-receipt
   integration test, plus firewall block and escalate cases, signature
   rejection, and replay rejection.

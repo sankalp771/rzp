@@ -236,10 +236,32 @@ envelopes match across parties ✓". An out-of-band edit of entry *k* makes
 verify a copied database offline (`--db`), which is how the tamper demo
 runs without touching a live volume.
 
-## F7 — Evals run
+## F7 — Evals run (FEATURE-011, `pnpm evals`)
 
-Eval harness → spins up N sessions across scenario mix (honest / aggressive /
-corrupted-goal buyers × merchant policies) → each session runs F1/F2/F3 paths
-→ outcomes collected → metrics computed (deal-close rate, avg discount
-conceded, firewall catch rate, false-block rate) → report written to a
-committed artifact → dashboard evals page reads latest report.
+`evals/src/cli.ts` → for each scenario × index (honest, aggressive,
+stingy_merchant, corrupted_layer1, corrupted_semantic; ground truth fixed
+by the scenario) → a seeded PRNG draws the session's parameters (budget;
+buyer tuning; merchant policy; pinned target) → **one fresh in-process
+stack** (`stack.testkit.ts`: merchant, firewall, settlement with the
+simulated Razorpay client, buyer — the same boundary/firewall/settlement
+code Compose runs) → `POST /control/run` → the session walks F1 and, per
+scenario, F2 or F3 → the record is built from the buyer's result plus the
+services' own tables (`llm_moves` on both agents, `verdicts.verifier_json`
+on the firewall) → classified against ground truth (settled / walked_away /
+false_block / caught / escalated / false_allow / failed) and attributed to
+the layer that stopped it (strategy / policy / intent_verifier / human) →
+the curve prediction for the same parameters is computed with the
+services' own `bidPrice` / `askPrice` / `effectiveFloor` → appended to
+`evals/runs/<run-id>/sessions.jsonl` (re-running the run id resumes) →
+live mode: sleep `EVALS_PACE_MS`, back off after a rate-limited session,
+stop cleanly after three in a row → `report.json` + `REPORT.md` in the run
+dir (every rate with n/d; providers; floor leaks; curve-vs-LLM comparison
+with an optional `--baseline` run; failures; provenance incl. git commit
+and models) → `--publish` copies them to `evals/report.json` /
+`evals/REPORT.md` → the dashboard's Evals tab (`GET /api/evals/report`,
+bind-mounted read-only under Compose) renders the tables; the README
+metrics table is copied from the same file (Gate 7).
+
+Two modes over the same seed: `stub` (deterministic curves, layer 1 only —
+exact, CI-checked by `evals/src/harness.test.ts`) and `live` (the three
+adapters from `.env`, real clock).

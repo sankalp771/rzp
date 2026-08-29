@@ -16,6 +16,111 @@ Entry format:
 
 ---
 
+### D026 — 2026-08-29 — Two truncated live evals runs are kept, labelled, and not cited; the cited live run has a Mistral buyer — [human + Claude Fable 5]
+- **Decision:** `evals/runs/live-42` (4 of 50 sessions, Gemini buyer;
+  stopped when `gemini-2.5-flash` began failing every call on quota) and
+  `evals/runs/live-42-lite-outage` (12 sessions during which every call
+  to every provider failed with `fetch failed` — a network outage on the
+  machine) stay in the repository under those names and are not cited
+  anywhere. The live run the README cites is `live-42-mistral`: buyer
+  `mistral/mistral-small-latest`, seller `groq/openai/gpt-oss-120b`,
+  verifier `mistral/mistral-small-latest`, same seed 42, provenance note
+  stating why. A run with the demo's Gemini buyer is to be executed on a
+  fresh quota day (Day 12/13) under a new run id and cited beside it.
+- **Because:** EVALS.md §6 forbids re-rolling and requires a decision
+  entry and the artifacts to stay when a run is discarded — so nothing is
+  deleted, and the outage run is named for what it is. The Gemini key's
+  free quota is exhausted for the day on every model (the 429 body says
+  "exceeded your current quota"), which no pacing or retry budget can
+  wait out inside one session; running the buyer on the curve and
+  calling it "live" would be the lie this project exists to avoid.
+- **Instead of:** waiting a day with no live numbers on the day the
+  harness landed; deleting the two truncated directories (would violate
+  §6 and hide the quota/outage story, which is itself evidence of the
+  pacing and stop rules working); putting both agents on Groq (self-play
+  on one model muddies the "pair" reading — Mistral on the buyer keeps
+  two models across the table).
+- **Tradeoff accepted:** the cited pair is not the demo's pair (Gemini
+  buyer); the verifier and the buyer share a model. Both are stated in
+  the report's provenance and in the README's table caption.
+- **Revisit if:** the Gemini-buyer run completes on a later day — then it
+  becomes the cited run and this one stays as the second, and the README
+  says "reproduced across two buyer models" only if the numbers earn it.
+
+### D025 — 2026-08-29 — Evals: one in-process harness, two LLM modes, five scenarios on a seed, a per-session curve oracle — and what the numbers do and do not claim — [human + Claude Fable 5]
+- **Decision:** The evals harness (`evals/`, FEATURE-011) drives the same
+  four-service in-process stack the E2E suite uses (`stack.testkit.ts`:
+  real protocol, boundary, firewall both layers, settlement engine over
+  the simulated Razorpay client), one fresh stack per session, fifty
+  sessions per run across five scenarios — `honest`, `aggressive`,
+  `stingy_merchant` (benign), `corrupted_layer1`, `corrupted_semantic`
+  (corrupted) — with each benign session's budget drawn from a seeded
+  PRNG and the target pinned to the vase. Two modes on the same seed:
+  `stub` (deterministic curves, layer 1 only; exact, asserted in CI
+  against the closed-form curves) and `live` (the three adapters from
+  `.env`, real clock). Every session carries a curve prediction computed
+  with the services' own `bidPrice` / `askPrice` / `effectiveFloor`, so
+  the LLM-vs-curve comparison is parameter-for-parameter; every catch is
+  attributed to the layer that made it; every rate is printed with its
+  numerator and denominator; the artifacts (`evals/runs/<run-id>/
+  sessions.jsonl`, `report.json`, `REPORT.md`, and the published copies
+  under `evals/`) are committed from executed runs. The report's first
+  line says settlement is simulated; provenance carries the git commit,
+  models per role, seed, clock, requested vs completed, and operator
+  notes (e.g. a widened adapter retry budget).
+- **Because:** The claims the README makes need a score sheet with the
+  failure numbers on it — false blocks, false allows, fallbacks, floor
+  leaks — from re-runnable runs (EVALS.md's one rule). In-process is the
+  only place fifty parameterised sessions can run under the feature
+  freeze: per-session mandate, tuning and policy variation is not
+  something the control plane exposes (and must not gain now), the
+  buyer's control plane is serial, and fifty allows would burn the
+  10/hour velocity budget; in-process, all three are test-kit knobs.
+  Razorpay is not what the evals measure — Gate 4 proved that leg live
+  on Day 7 — so the simulated client is honest here, stated on line one.
+  Pinning the vase lets a drawn budget press the reservation below list
+  (through the shortlist any budget under ₹4,800 would silently swap the
+  item), which is what makes the stub run a distribution over the curves
+  rather than one number repeated. The per-session curve oracle
+  discharges the obligation logged since Day 8 ("compare LLM-advised vs
+  pure-curve economics") without a second run and cannot drift from the
+  code because it is the code. Layer attribution turns "catch rate" into
+  the three-rung ladder as numbers — the pitch's strongest table.
+- **Instead of:** HTTP against Compose (see above); EVALS.md's original
+  six-scenario matrix (15/8/7/8/6/6) — E "prompt-injected catalog" needs
+  a fixture that is not built (the fences are unit-tested; a live
+  injection trial stays a Day 12 candidate) and F "over-budget push" is
+  unreachable through the honest buyer (the clamp caps every offer at
+  min(list, budget); producing it needs a cart-corruption seam, a service
+  change; `BUDGET_EXCEEDED` is covered by `firewall/policy.test.ts`) —
+  so five scenarios × 10, recorded here as EVALS.md §6 requires; a
+  per-run `evals/reports/<run-id>/REPORT.md` (the dashboard and
+  `.env.example` already named `evals/report.json`; the published pair
+  under `evals/` plus per-run directories keeps both); a `tsc` build of
+  the harness (it imports the build-excluded test kit; it runs from
+  source via `tsx`, already a workspace devDependency, and is
+  typechecked instead); a frozen clock in live mode (it would zero the
+  verifier's latency and stamp fifty sessions with one timestamp).
+- **Tradeoff accepted:** No live Razorpay order in the evals. Holds are
+  never decided during a run (a hold nobody answers ends `pending` and
+  counts as caught, reported separately as escalated). In stub mode
+  `corrupted_semantic` settles 10/10 by construction — the deterministic
+  system cannot see semantic drift; the row stays in the table because it
+  is what layer 2 exists for. Live runs are quota-bound: Gemini's free
+  tier rate-limits inside a session, so the live run widens the adapter's
+  retry budget (an existing env knob; in-process there is no 30 s HTTP
+  window to violate), paces sessions, stops cleanly after three
+  consecutive rate-limited sessions, resumes by run id, and the README
+  cites exactly "N of 50". Both agents are model-advised in live mode, so
+  the comparison measures the pair, not one side. The buyer's tuning
+  needed a three-line plumbing option in `services/buyer/src/app.ts` —
+  the one non-test-kit service edit under the freeze.
+- **Revisit if:** the control plane ever grows a scenario seam (then an
+  HTTP-mode run against Compose becomes a second, independent
+  measurement); a cart-corruption seam is accepted (scenario F becomes
+  reachable); or a paid tier removes the quota ceiling (then the retry
+  override and the "N of 50" line should go).
+
 ### D024 — 2026-08-28 — One operator token for the read API; a thin console that proxies and injects secrets server-side; verification claims stay whole-ledger — [human + Claude Fable 5]
 - **Decision:** Every service exposes `GET /ledger`, `GET /ledger/verify`
   and `GET /sessions` (the merchant also `GET/PUT /policy`) behind one
