@@ -128,6 +128,30 @@ Format — exactly five lines plus header:
 
 <!-- entries begin below -->
 
+### 2026-08-29 17:30 — [Claude Fable 5 (claude-fable-5)]
+- Did: Demo re-verification on a cold machine (Docker Desktop was down;
+  images predated commits df0ddcd/9a8b264 → `pnpm build` +
+  `docker compose up -d --build`, five healthy). Live: benign run SETTLED
+  on real order `order_TVZU3KYZGkM1ZI` (14/14 sigs, 0 fallbacks);
+  `var_relay_8ch` BLOCKED by layer 1 (CATEGORY_BLOCKED, 17/17 sigs);
+  `var_corp_hamper` BLOCKED by layer 2 (INTENT_DRIFT_CATEGORY, Mistral,
+  17/17 sigs); four chains verified (buyer 79 / merchant 62 / firewall 30
+  / settlement 21 entries) with 14 + 16 + 16 envelopes matched
+  cross-party; firewall DB copy verified offline (44 entries) then entry
+  5 corrupted → `CHAIN BROKEN at entry 5 (entry_hash_mismatch)`;
+  dashboard serves HTTP 200. No code changed.
+- Left: Day 11 evals harness as listed in the 2026-08-28 entry.
+- Watch out: containers auto-restart with Docker Desktop but images do
+  NOT track HEAD — check `docker image inspect … --format '{{.Created}}'`
+  against `git log -1 --format=%ci` before any demo. `verify-ledgers.mjs
+  --db` exits 1 on a broken chain by design (a shell will show "error").
+  Mistral again blocked the hamper outright — the human queue still has
+  no organic escalation on record.
+- Tests: LLM contract suite 6/6 live (gemini-2.5-flash, gpt-oss-120b,
+  mistral-small-latest); Gate 5 tamper on a copy; Gate 6 compose five
+  healthy; three live E2E transcripts read top to bottom.
+- Decisions: none.
+
 ### 2026-08-28 20:00 — [Claude Fable 5 (claude-fable-5)]
 - Did: FEATURE-010 — `packages/ledger` (chain, verify naming the first
   break, no update/delete anywhere by source search); every service
