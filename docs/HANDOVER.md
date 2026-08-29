@@ -22,7 +22,10 @@ blocks; corrupted 20/20 caught (policy 10, intent_verifier 10), 0 false
 allows; LLM pair 10.1% vs curves 12.3% below list; Groq floor leaks
 13.3% (27/203). Stub run `stub-42`: curves exact, relay 10/10 caught,
 hamper 10/10 false allow (designed). The README table is copied from the
-artifact. Tag `known-good-4`. Days 12–13: polish, video, submission.
+artifact. Tag `known-good-4` (moved onto the BUG-005 fix commit — the
+Day 11 close commit `5d3c686` was CI-red: evals lacked its
+`@negotiator/ledger` workspace dep, so a clean clone built evals before
+ledger; D027). Days 12–13: polish, video, submission.
 **Done:** Docs system; stack decided (D006–D009); repo scaffold
 (FEATURE-001); ACNP spec + protocol library (FEATURE-002/003); merchant
 server (FEATURE-004); buyer agent (FEATURE-005, D014); LLM adapter layer
@@ -137,6 +140,30 @@ Format — exactly five lines plus header:
 - Decisions: <"none" or pointer to DECISIONS.md entries added>
 
 <!-- entries begin below -->
+
+### 2026-08-29 23:00 — [Claude Fable 5 (claude-fable-5)]
+- Did: BUG-005 — CI run `33258233847` on `5d3c686` was red at
+  `pnpm build` (twelve `TS2307 @negotiator/ledger` from the evals
+  typecheck of service source): evals never declared its
+  `@negotiator/ledger` workspace dep, so on a clean clone pnpm built
+  evals and ledger in the same tier and ledger's `dist/` did not exist
+  yet; local machines passed on stale `dist/`. Reproduced by scrubbing
+  every `dist/`; fixed by declaring the dep (one manifest line + lock);
+  re-ran CI's exact sequence from a scrubbed tree. D027: `known-good-4`
+  moved onto the fix commit. Gate 0 gained two checklist lines.
+- Left: unchanged from 21:30 — Gemini-buyer live run on a fresh quota
+  day; Day 12 README diagram + protocol summary, video, prompt-injection
+  trial, floor-leak hardening decision.
+- Watch out: a local green build proves nothing about build ORDER unless
+  `dist/` was scrubbed first; any future package that typechecks another
+  package's source must declare every dep that source imports. The
+  Day 11 close was pushed without waiting for CI — that is now a Gate 0
+  line. The fix commit's CI run id and verdict are recorded in the next
+  handoff entry (this one is written before that run exists).
+- Tests: scrubbed-tree `pnpm install --frozen-lockfile`, `build`, `lint`,
+  `typecheck` all exit 0; `pnpm test` 348 passed / 6 skipped (34 files
+  + 1 skipped) — same counts as the last green CI.
+- Decisions: D027.
 
 ### 2026-08-29 21:30 — [Claude Fable 5 (claude-fable-5)]
 - Did: FEATURE-011 — `evals/` harness (five scenarios on a seed, one

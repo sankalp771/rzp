@@ -42,6 +42,9 @@ importers:
 
   evals:
     dependencies:
+      '@negotiator/ledger':
+        specifier: workspace:*
+        version: link:../packages/ledger
       '@negotiator/llm':
         specifier: workspace:*
         version: link:../packages/llm

@@ -16,6 +16,29 @@ Entry format:
 
 ---
 
+### D027 — 2026-08-29 — `known-good-N` tags mean CI-green; `known-good-4` is moved onto the BUG-005 fix commit — [human + Claude Fable 5]
+- **Decision:** a `known-good-N` tag promises that the tagged sha passed
+  CI on a clean clone (BUILD_PLAN's "Gate green. Tag `known-good`"). The
+  Day 11 tag was cut on `5d3c686`, whose CI run `33258233847` failed at
+  `pnpm build` (BUG-005). The tag is deleted and re-created on the fix
+  commit, and pushed with `--force` for that single tag ref only; the
+  commits themselves are untouched.
+- **Because:** a tag named "known good" on a red commit is a false claim
+  in the judged artifact, and the tag is the thing an operator would
+  check out to record the video. Moving one tag ref is not a history
+  rewrite — every commit and every earlier tag stays where it was —
+  so it does not conflict with CLAUDE.md §7's "no force-push rewrites
+  after day 1", which is about commit history.
+- **Instead of:** adding `known-good-4.1` beside the red `known-good-4`
+  (leaves a false claim standing and forks the naming); leaving the tag
+  where it is with a note (the note would live in a doc nobody reads
+  before checking out the tag).
+- **Tradeoff accepted:** anyone who fetched `known-good-4` before the
+  move has a stale tag and needs `git fetch --tags --force`. Nobody but
+  the author has cloned this repository yet.
+- **Revisit if:** the repository gains a second contributor — then tags
+  become immutable and the `.1` suffix convention applies instead.
+
 ### D026 — 2026-08-29 — Two truncated live evals runs are kept, labelled, and not cited; the cited live run has a Mistral buyer — [human + Claude Fable 5]
 - **Decision:** `evals/runs/live-42` (4 of 50 sessions, Gemini buyer;
   stopped when `gemini-2.5-flash` began failing every call on quota) and

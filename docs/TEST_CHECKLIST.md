@@ -12,6 +12,12 @@ commands get filled in as the toolchain lands (they must be copy-pasteable;
 - [ ] Diff reviewed line by line (human) — no secrets, no stray debug code,
       no unrelated changes.
 - [ ] Commit message is conventional and describes ONE logical change.
+- [ ] If a package manifest or workspace dependency changed: delete every
+      `dist/` and `*.tsbuildinfo` first, then `pnpm build` — a stale tree
+      cannot vouch for build order (BUG-005).
+- [ ] After the push: the CI run id and verdict for that sha are quoted in
+      the session's close report. Local green is not the gate; CI is the
+      only clean machine in the loop (BUG-005).
 
 ## Gate 1 — protocol changes
 - [ ] Schema validation: valid fixture accepted, each invalid fixture (missing
