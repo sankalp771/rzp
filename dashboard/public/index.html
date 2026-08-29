@@ -273,7 +273,16 @@
       </section>
 
       <section id="tab-evals">
-        <div class="card"><pre id="evals-out" class="dim">No evals report yet (Day 11).</pre></div>
+        <div class="card">
+          <p class="honest">
+            Reads <code>evals/report.json</code> — the committed artifact of an executed run (<code
+              >pnpm evals</code
+            >). Every rate is shown with its numerator/denominator; failure numbers sit in the same
+            tables as the wins. Settlement in the evals is the in-process simulated client (the live
+            Razorpay leg was proven on Day 7).
+          </p>
+        </div>
+        <div id="evals-out" class="dim">No evals report yet (Day 11 writes evals/report.json).</div>
       </section>
     </main>
 
@@ -586,13 +595,227 @@
         if (r.status === 200) $('policy-json').value = JSON.stringify(r.body, null, 2);
       });
 
-      // --- Evals
+      // --- Evals (FEATURE-011): render report.json as the metrics tables
+      const pctOf = (x) => (!x || x.pct === null ? '— (0/0)' : `${x.pct}% (${x.n}/${x.d})`);
+      const numOf = (x, d = 1) => (x === null || x === undefined ? '—' : Number(x).toFixed(d));
+      const rupOf = (p) => (p === null || p === undefined ? '—' : rupees(p));
+      const econOf = (e) =>
+        `${e.settled} settled · ${numOf(e.avg_discount_pct)}% below list · ${numOf(e.avg_rounds)} rounds · ${rupOf(e.avg_settled_total)}`;
+      const table = (head, rows) =>
+        `<table><thead><tr>${head.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows
+          .map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join('')}</tr>`)
+          .join('')}</tbody></table>`;
+      const layersOf = (by) =>
+        Object.entries(by || {})
+          .filter(([, v]) => v)
+          .map(([k, v]) => `${esc(k)} ${v}`)
+          .join(', ') || '—';
       async function loadEvals() {
+        const el = $('evals-out');
         const res = await fetch('/api/evals/report');
-        $('evals-out').textContent =
-          res.status === 200
-            ? JSON.stringify(await res.json(), null, 2)
-            : 'No evals report yet (Day 11 writes evals/report.json).';
+        if (res.status !== 200) {
+          el.className = 'dim';
+          el.textContent = 'No evals report yet (Day 11 writes evals/report.json).';
+          return;
+        }
+        const r = await res.json();
+        const p = r.provenance;
+        el.className = '';
+        const cards = [];
+        cards.push(
+          `<div class="card"><b>run <code>${esc(p.run_id)}</code></b> · ${esc(p.mode)} mode · ${p.completed}/${p.requested} sessions` +
+            (p.stopped_early
+              ? ` · <span class="warn">stopped early: ${esc(p.stopped_early)}</span>`
+              : '') +
+            `<div class="honest">commit <code>${esc(p.git_commit)}</code> · buyer <code>${esc(p.models.buyer)}</code> · seller <code>${esc(p.models.seller)}</code> · verifier <code>${esc(p.models.verifier)}</code> · seed ${p.seed} · clock ${esc(p.clock)} · wall ${(p.wall_ms / 1000).toFixed(0)} s · ${esc(p.settlement)}</div>${(p.notes || []).map((n) => `<div class="honest">note: ${esc(n)}</div>`).join('')}</div>`,
+        );
+        const benign = r.scenarios.filter((s) => s.benign);
+        const corrupted = r.scenarios.filter((s) => s.corrupted);
+        const bRow = (name, s, b) => [
+          name,
+          `${s.completed}${s.failed ? ` <span class="bad">(${s.failed} failed)</span>` : ''}`,
+          pctOf(b.deal_close),
+          pctOf(b.walk_away),
+          `<span class="${b.false_block.n ? 'bad' : 'ok'}">${pctOf(b.false_block)}</span>${b.false_block_held ? ` (${b.false_block_held} held)` : ''}`,
+          `${numOf(b.llm.avg_discount_pct)}%`,
+          numOf(b.llm.avg_rounds),
+          rupOf(b.llm.avg_settled_total),
+        ];
+        cards.push(
+          `<div class="card"><b>Benign scenarios — negotiation quality and the false-block rate</b>${table(
+            [
+              'Scenario',
+              'Sessions',
+              'Deal-close',
+              'Walk-away',
+              'False block',
+              'Avg discount',
+              'Avg rounds',
+              'Avg settled',
+            ],
+            [
+              ...benign.map((s) => bRow(`<code>${esc(s.scenario)}</code>`, s, s.benign)),
+              ...(r.pooled.benign
+                ? [
+                    bRow(
+                      '<b>pooled</b>',
+                      { completed: r.pooled.benign.sessions, failed: r.pooled.benign.failed },
+                      r.pooled.benign,
+                    ),
+                  ]
+                : []),
+            ],
+          )}</div>`,
+        );
+        const cRow = (name, s, c) => [
+          name,
+          `${c.reached_firewall}${s.failed ? ` <span class="bad">(${s.failed} failed)</span>` : ''}`,
+          pctOf(c.caught),
+          String(c.escalation_share.n),
+          `<span class="${c.false_allow.n ? 'bad' : 'ok'}"><b>${pctOf(c.false_allow)}</b></span>`,
+          String(c.walked_before_firewall),
+          layersOf(c.caught_by),
+        ];
+        const misses = r.scenarios.flatMap((s) =>
+          s.corrupted ? s.corrupted.false_allow_sessions : [],
+        );
+        cards.push(
+          `<div class="card"><b>Corrupted scenarios — catch rate, false allows, and who caught it</b>${table(
+            [
+              'Scenario',
+              'Reached firewall',
+              'Caught',
+              'of which held',
+              'False allow',
+              'Walked away first',
+              'Caught by',
+            ],
+            [
+              ...corrupted.map((s) => cRow(`<code>${esc(s.scenario)}</code>`, s, s.corrupted)),
+              ...(r.pooled.corrupted
+                ? [cRow('<b>pooled</b>', { failed: r.pooled.corrupted.failed }, r.pooled.corrupted)]
+                : []),
+            ],
+          )}<div class="honest ${misses.length ? 'bad' : 'ok'}">Critical misses (money moved on a corrupted cart): ${misses.length}${misses.length ? ' — ' + misses.map((m) => `<code>${esc(short(m))}</code>`).join(', ') : ''}</div></div>`,
+        );
+        const cmp = r.comparison;
+        cards.push(
+          `<div class="card"><b>Curve vs LLM — benign economics on identical parameters</b>${table(
+            ['Scenario', 'Curves alone (prediction)', 'This run'],
+            [
+              ...benign.map((s) => [
+                `<code>${esc(s.scenario)}</code>`,
+                econOf(s.benign.curve),
+                econOf(s.benign.llm),
+              ]),
+              ...(r.pooled.benign
+                ? [['<b>pooled</b>', econOf(r.pooled.benign.curve), econOf(r.pooled.benign.llm)]]
+                : []),
+              ...(cmp.baseline
+                ? [
+                    [
+                      `baseline run <code>${esc(cmp.baseline.run_id)}</code> (${esc(cmp.baseline.mode)}, executed)`,
+                      econOf(cmp.baseline.economics),
+                      '',
+                    ],
+                  ]
+                : []),
+            ],
+          )}<div class="honest">${esc(cmp.reading)}</div></div>`,
+        );
+        cards.push(
+          `<div class="card"><b>LLM providers</b>${table(
+            [
+              'Role',
+              'Model',
+              'Calls',
+              'Answered',
+              'Fallbacks',
+              'Rate-limited',
+              'Latency median / p95',
+              'Recommendations',
+            ],
+            r.providers.map((s) => [
+              esc(s.role),
+              `<code>${esc(s.model_id)}</code>`,
+              s.calls,
+              s.used,
+              `${s.fallbacks}${
+                Object.keys(s.fallback_kinds).length
+                  ? ` (${esc(
+                      Object.entries(s.fallback_kinds)
+                        .map(([k, v]) => `${k} ${v}`)
+                        .join(', '),
+                    )})`
+                  : ''
+              }`,
+              s.rate_limited,
+              s.latency_ms.median === null
+                ? '—'
+                : `${Math.round(s.latency_ms.median)} / ${Math.round(s.latency_ms.p95)} ms`,
+              s.recommendations
+                ? esc(
+                    Object.entries(s.recommendations)
+                      .map(([k, v]) => `${k} ${v}`)
+                      .join(', '),
+                  )
+                : '',
+            ]),
+          )}</div>`,
+        );
+        const fl = r.floor_leaks;
+        cards.push(
+          `<div class="card"><b>Seller rationale floor leaks</b><div class="honest">${pctOf(fl.rate)} of seller counter-offers with a rationale mentioned a floor` +
+            (Object.keys(fl.by_model).length
+              ? ` — ${Object.entries(fl.by_model)
+                  .map(([m, x]) => `<code>${esc(m)}</code> ${pctOf(x)}`)
+                  .join(', ')}`
+              : '') +
+            `</div>${fl.examples.map((e) => `<div class="honest">· <code>${esc(e.scenario)}</code> #${e.index} round ${e.round}: matched <code>${esc(e.matched)}</code> — “${esc(e.excerpt)}”</div>`).join('')}</div>`,
+        );
+        cards.push(
+          `<div class="card"><b>Failures and surprises</b>${
+            r.failures.length
+              ? r.failures
+                  .map(
+                    (f) =>
+                      `<div class="honest">· <code>${esc(f.scenario)}</code> #${f.index} ${f.session_id ? `<code>${esc(short(f.session_id))}</code>` : ''}: <span class="bad">${esc(f.classification)}</span> ${esc(f.reason || '')}${f.caught_by ? ` by ${esc(f.caught_by)}` : ''}${f.error ? ` — ${esc(String(f.error).split('\n')[0])}` : ''}</div>`,
+                  )
+                  .join('')
+              : '<div class="honest ok">none: every session went the way its ground truth says it should.</div>'
+          }</div>`,
+        );
+        cards.push(
+          `<div class="card"><details><summary>All ${r.sessions.length} sessions</summary>${table(
+            [
+              'Scenario',
+              '#',
+              'Budget',
+              'Outcome',
+              'Judged',
+              'Caught by',
+              'Rounds',
+              'Settled',
+              'Curve',
+              'Verdict',
+            ],
+            r.sessions.map((s) => [
+              `<code>${esc(s.scenario)}</code>`,
+              s.index,
+              rupees(s.budget),
+              esc(s.outcome) + (s.reason ? ` <span class="dim">${esc(s.reason)}</span>` : ''),
+              `<span class="${['false_block', 'false_allow', 'failed'].includes(s.classification) ? 'bad' : 'ok'}">${esc(s.classification)}</span>`,
+              esc(s.caught_by || '—'),
+              s.rounds,
+              rupOf(s.settled_total),
+              s.curve
+                ? `${esc(s.curve.outcome)} ${s.curve.price === null ? '' : rupees(s.curve.price)} r${s.curve.rounds}`
+                : '—',
+              esc(s.verdict || '—'),
+            ]),
+          )}</details></div>`,
+        );
+        el.innerHTML = cards.join('');
       }
     </script>
   </body>

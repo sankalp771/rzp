@@ -68,6 +68,11 @@ services:
     # surface with no login of its own (THREAT_MODEL non-goals, D024).
     ports: ['127.0.0.1:4005:4005']
     environment: { PORT: 4005 }
+    volumes:
+      # The Evals tab reads the committed report (FEATURE-011); the image
+      # only ships dashboard/ + packages/, so the artifact is bind-mounted
+      # read-only from the checkout.
+      - ./evals:/app/evals:ro
     healthcheck: *healthcheck
     depends_on:
       buyer: { condition: service_healthy }
