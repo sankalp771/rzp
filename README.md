@@ -7,7 +7,7 @@
 
 Built for the Razorpay AI Buildathon, Track 1: AI Growth & Agentic Commerce.
 
-**Status:** Day 11 of 13 — **feature freeze + the evals score sheet**
+**Status:** Day 11 / 13 — **feature freeze + the evals score sheet**
 (see [Metrics](#metrics--evals-run-live-42-mistral)). Done: ACNP v0.1 spec + protocol library (signatures, schemas,
 replay guard) + merchant server (catalog, policy bounds engine,
 deterministic negotiation) + buyer agent (mandate registration,
