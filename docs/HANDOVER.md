@@ -63,9 +63,13 @@ for the day on every model (run `live-42` stopped at 4/50; kept, D026);
 re-run `pnpm evals -- --mode live --n 10 --seed 42 --run-id
 live-42-gemini --baseline stub-42 --publish` on a fresh quota day and
 cite both. The verifier and the buyer share a model in that run. The
-dashboard page itself has not been clicked by Claude (the new Evals tab
-included) — every call it makes was driven through the proxy with curl;
-the user should open `:4005` once and read the Replay and Evals tabs. A failed settlement dispatch is
+dashboard was clicked for real on Day 12 (headless Chromium via
+Playwright, stub stack): all five tabs render; a forced hold (retired
+Gemini model id) appeared in Queue, **Approve was clicked in the page**,
+the held run resumed to `allow/human` + a receipt, and Replay showed
+4/4 ledgers verified with 21/21 envelopes matched; the only console
+error is a missing `/favicon.ico` (cosmetic). Not clicked: Start run on
+the Run tab (runs were started from the terminal) and Policy → Save. A failed settlement dispatch is
 recorded (cart row + ledger `MESSAGE_OUT … delivery: failed`) but there is
 no re-dispatch (drop candidate #2, not built); in-flight settlements are
 not resumed after a settlement crash. The operator API is ONE token for

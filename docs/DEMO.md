@@ -182,8 +182,11 @@ one rehearsal in the terminal by Claude, one by the human on camera day.
   · verify-ledgers 4/4 ✓, 19 envelopes matched · copy verified offline
   ✓ · one edited entry → `CHAIN BROKEN at entry 5` ✘. With a live Gemini
   verifier: vase allowed, hamper blocked, injected hamper blocked 3/3.
-  Transcripts in FEATURE-012. **Not rehearsed by Claude:** the Compose
-  path, the Mistral verifier, the human queue on camera.
+  Transcripts in FEATURE-012. Console: all five tabs opened in headless
+  Chromium; a forced hold approved by clicking Approve in the Queue tab,
+  run resumed to `allow/human`, Replay 4/4 verified, 21/21 matched.
+  **Not rehearsed by Claude:** the Compose path, the Mistral verifier,
+  the human queue on camera.
 - (human, camera day) — _record here: date, tag, what improvised_.
 
 ## Submission checklist — do this on 4 September, not on the 5th
