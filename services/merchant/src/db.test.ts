@@ -10,7 +10,7 @@ describe('merchant db', () => {
     expect(seedIfEmpty(db)).toBe(true);
     expect(seedIfEmpty(db)).toBe(false); // idempotent
     const items = db.prepare('SELECT COUNT(*) AS n FROM catalog_items').get() as { n: number };
-    expect(items.n).toBe(10);
+    expect(items.n).toBe(11); // FEATURE-012 adds itm_inject_hamper
     const policy = loadPolicy(db);
     expect(policy.max_rounds).toBeGreaterThan(0);
     // Demo invariants the seed must keep (FEATURE-004 amendment #3):
