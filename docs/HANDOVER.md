@@ -8,24 +8,24 @@ handoff entries scroll down.
 
 ## Current state (edit in place)
 
-**Phase:** Week 2, Day 11 done — **feature freeze holds; the evals score
-sheet exists.** `pnpm evals` (FEATURE-011, D025/D026) runs 50 sessions
-over the in-process stack across five scenarios on a seed, in `stub`
-(curves only, CI-asserted against the closed-form formulas) and `live`
-(the three adapters from `.env`) modes; every rate is n/d; catches are
-attributed to the layer; each session carries its curve prediction so
-LLM-vs-curve is parameter-for-parameter; runs resume by id; the report
-(`evals/report.json` + `REPORT.md`, per-run under `evals/runs/`) is
-rendered by the dashboard's Evals tab (Compose bind-mounts `./evals`).
-Cited live run `live-42-mistral`: benign 24/30 closed, 0/30 false
-blocks; corrupted 20/20 caught (policy 10, intent_verifier 10), 0 false
-allows; LLM pair 10.1% vs curves 12.3% below list; Groq floor leaks
-13.3% (27/203). Stub run `stub-42`: curves exact, relay 10/10 caught,
-hamper 10/10 false allow (designed). The README table is copied from the
-artifact. Tag `known-good-4` (moved onto the BUG-005 fix commit — the
-Day 11 close commit `5d3c686` was CI-red: evals lacked its
-`@negotiator/ledger` workspace dep, so a clean clone built evals before
-ledger; D027). Days 12–13: polish, video, submission.
+**Phase:** Week 2, Day 12 done — **feature freeze holds; the judged
+surface is finished.** README rewritten in CLAUDE.md §7 order (problem →
+mermaid diagram → quickstart incl. the key-less path → protocol summary
+with all 17 types → metrics table untouched → threat table → demo ladder);
+`docs/DEMO.md` (storyboard, pre-demo checklist, rehearsal record,
+**submission checklist with the key-rotation slot**) and `docs/PITCH.md`
+(every component in plain words + fifteen panel questions) exist; secret
+scanning is a CI job (`secrets`, gitleaks over full history, D028) with
+the one fake fixture allow-listed by fingerprint; `.env.example` now
+documents every variable the code reads; PROTOCOL.md reconciled
+editorially to the code (D030, its own commit) with the behavioural gaps
+listed in BUG-006; THREAT_MODEL citations verified by grep; the T4
+injection fixture `var_inject_hamper` is seeded and, against a **Gemini**
+verifier, was blocked 3/3 (the demo's **Mistral** run is still owed);
+floor leak recorded as v0.2 with its number (D029). Clean clone → green
+in 41 s (warm pnpm store); key-less ladder + offline tamper demo
+recorded (FEATURE-012). Day 13: the human's list below, then submit
+early.
 **Done:** Docs system; stack decided (D006–D009); repo scaffold
 (FEATURE-001); ACNP spec + protocol library (FEATURE-002/003); merchant
 server (FEATURE-004); buyer agent (FEATURE-005, D014); LLM adapter layer
@@ -38,9 +38,26 @@ hold → pending + merchant human-verdict handling + `review.mjs` +
 per-service audit ledgers + operator API + dashboard + verify script +
 resume (FEATURE-010, D023/D024); evals harness, two committed 50-session
 runs, report + dashboard tab, EVALS/THREAT_MODEL/README reconciled
-(FEATURE-011, D025/D026).
+(FEATURE-011, D025/D026); Day 12 polish (FEATURE-012, D028–D030, BUG-006).
 **In progress:** — (feature freeze)
-**Broken / unverified:** The cited live evals run has a **Mistral buyer**,
+**Broken / unverified:** **Day 12 session ran in a container with no
+Docker daemon and no Groq/Mistral egress** — so: (1) the Compose
+quickstart was NOT re-run here (CI `compose` job on `main` `fba4567`,
+run 33313929552, is the standing proof; the human repeats it on camera
+day); (2) the **Mistral injection trial is owed**: `node scripts/negotiate.mjs
+--target var_inject_hamper` on the demo line, transcript into
+FEATURE-012 / THREAT_MODEL T4 either way; (3) **CI has not run on the
+Day 12 commits** — `ci.yml` triggers on `push: main` and PRs only, and
+the work is on `claude/fork-repo-plan-timeline-32edzz` — merge (or open a
+PR), quote the run id, then cut `known-good-5` on the green sha (D027);
+the new `secrets` job runs for the first time then; (4) the Gemini evals
+re-run `live-42-gemini` is 6/50 (buyer + verifier on ONE Gemini key →
+the verifier was absent under the buyer's rate limit → 4 holds counted as
+false blocks) — kept, labelled, not cited, and it is not the demo line
+(seller was stub); the README still cites `live-42-mistral`; (5) the
+three LLM keys were pasted into a chat on Day 12 — **rotate all three
+after the last live run and before submitting** (DEMO.md checklist). Older
+items still true: The cited live evals run has a **Mistral buyer**,
 not the demo's Gemini buyer — the Gemini key's free quota was exhausted
 for the day on every model (run `live-42` stopped at 4/50; kept, D026);
 re-run `pnpm evals -- --mode live --n 10 --seed 42 --run-id
@@ -120,8 +137,15 @@ test sleep must yield a macrotask so a concurrent "human" runs.
     (D023; `verify-ledgers.mjs`; tag `known-good-3`)
 11. ~~Dashboard: policy config, approval queue, session replay~~ ✅
     FEATURE-010 (D024; `:4005`, localhost only)
-12. Evals harness (50 synthetic negotiations) + metrics report
-13. Threat model doc, README polish, demo seed data, pitch video assets
+12. ~~Evals harness (50 synthetic negotiations) + metrics report~~ ✅
+    FEATURE-011 (D025/D026; tag `known-good-4`)
+13. ~~Threat model reconciled, README polish, demo kit~~ ✅ FEATURE-012
+    (D028–D030, BUG-006)
+14. **Day 13 (human):** Mistral injection trial → Compose rehearsal from
+    the tag → video (DEMO.md) → merge/PR so CI runs → `known-good-5` →
+    rotate keys → submit early (DEMO.md checklist). Only if slack: the
+    Gemini re-run on the real demo line (`live-42-gemini` resumes by id
+    on a fresh quota day, seller=groq, verifier=mistral).
 
 **Key dates:** Submission closes 5 Sept 2026. Feature freeze target: 2 Sept.
 Video + README polish: 3–4 Sept.
@@ -140,6 +164,27 @@ Format — exactly five lines plus header:
 - Decisions: <"none" or pointer to DECISIONS.md entries added>
 
 <!-- entries begin below -->
+
+### 2026-09-04 17:00 — [Claude Fable 5.1 (claude-fable-5-1)]
+- Did: FEATURE-012 Day 12 polish — README rewrite (diagram, key-less
+  quickstart, protocol summary, threat table, demo ladder); gitleaks CI
+  job + `.gitleaksignore` + `.env.example` gaps (D028); clean-clone timed
+  + key-less ladder + offline tamper; spec/threat-model/code audit →
+  BUG-006, PROTOCOL.md editorial reconciliation alone (D030), THREAT_MODEL
+  citations fixed; `var_inject_hamper` seeded (+ db.test 11) and blocked
+  3/3 by a live Gemini verifier; D029 floor leak documented; DEMO.md +
+  PITCH.md incl. the submission checklist with the key-rotation slot;
+  `live-42-gemini` 6/50 kept, not cited.
+- Left: the human's Day 13 list (Next up #14). No feature work.
+- Watch out: this session had no Docker and no Groq/Mistral egress — read
+  FEATURE-012 "Environment note" before trusting any live claim; CI has
+  not run on this branch; the keys pasted on Day 12 must be rotated;
+  `live-42-gemini` shows what a shared quota does to the verifier (keep
+  three providers on three roles for the video).
+- Tests: Gate 0 green on the final tree (lint clean, typecheck Done,
+  348 passed / 6 skipped); Gate 8 items 1–4 recorded in FEATURE-012 with
+  the container caveats; CI: pending merge/PR.
+- Decisions: D028, D029, D030.
 
 ### 2026-08-29 23:00 — [Claude Fable 5 (claude-fable-5)]
 - Did: BUG-005 — CI run `33258233847` on `5d3c686` was red at
