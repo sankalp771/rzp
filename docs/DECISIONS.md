@@ -51,6 +51,33 @@ Entry format:
   implementation appears — then "reference implementation" prose moves
   to an appendix.
 
+### D029 — 2026-09-04 — The seller floor leak is documented with its number, not hardened before submission — [human + Claude Fable 5.1]
+- **Decision:** The Groq seller names the floor it cannot cross in 13.3%
+  (27/203) of its counter-offer rationales (FEATURE-011, `live-42-mistral`).
+  The fix — do not show the seller model its floor at all; the clamp never
+  needed it — is about ten lines in `services/merchant`. It is not made
+  in v0.1. The number stays in the README, THREAT_MODEL T3 and the report
+  as a measured, named weakness with the fix attached as the v0.2 item.
+- **Because:** A prompt change invalidates the cited 50-session live run
+  (the seller's behaviour is part of what it measured) and forces a fresh
+  live run on free-tier quota two days before the deadline; it is also a
+  `services/merchant` change under the feature freeze. A quantified,
+  documented weakness with a one-line fix attached is worth more to this
+  submission than a silent improvement nobody can check — and the number
+  is currently the strongest evidence that the evals measure honestly
+  (EVALS.md §1: report the failure numbers).
+- **Instead of:** hardening now and re-running (quota risk, freeze
+  violation, and the README table would change hours before the video);
+  filtering the rationale on the way out (hides the leak from the
+  transcript, not from the model; the metric would go to zero for the
+  wrong reason).
+- **Tradeoff accepted:** a panel member will ask why the seller leaks its
+  floor; the answer is the number, the mechanism (prose is not enforcement
+  — the price cannot leak, the words can) and the v0.2 line.
+- **Revisit if:** a spare quota day exists after everything in
+  FEATURE-012 is green — then the fix, a fresh live run, and both runs
+  cited side by side.
+
 ### D028 — 2026-09-04 — Secret scanning is a standing CI gate (gitleaks over full history), with fake fixtures allow-listed by fingerprint — [human + Claude Fable 5.1]
 - **Decision:** `.github/workflows/ci.yml` gains a `secrets` job:
   `actions/checkout` with `fetch-depth: 0` then `gitleaks/gitleaks-action@v2`
