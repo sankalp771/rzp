@@ -1,0 +1,4 @@
+# gitleaks fingerprints allowed on purpose (one per line). Each is a fake
+# value in a test that asserts the boot rule REFUSES it (CONSTRAINTS #2):
+# services/settlement/src/razorpay.test.ts — 'rzp_live_ABC123' with secret 's'.
+228c059fa2f110958cab095127d09dbad5ca6ac9:services/settlement/src/razorpay.test.ts:generic-api-key:12

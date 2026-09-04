@@ -21,6 +21,8 @@ docs/
   THREAT_MODEL.md              ← judged deliverable, pre-structured (T1–T10)
   BUILD_PLAN.md                ← day-by-day two-week plan + cut order
   EVALS.md                     ← eval methodology: 50-session matrix, honest metrics
+  DEMO.md                      ← the five-minute storyboard, pre-demo and submission checklists
+  PITCH.md                     ← every component in plain words + the panel's fifteen questions
   features/FEATURE-TEMPLATE.md ← copy before building anything
   bugs/BUG-TEMPLATE.md         ← copy before fixing anything
 ```

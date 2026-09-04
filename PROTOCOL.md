@@ -1,6 +1,6 @@
 # PROTOCOL.md — Agent Commerce Negotiation Protocol (ACNP) v0.1
 
-**Status:** Draft specification, normative for this implementation.
+**Status:** Draft specification, normative for this implementation. Editorial reconciliation against the reference implementation on 2026-09-04 (D030, `docs/bugs/BUG-006-spec-code-drift.md`): no wire change, version unchanged.
 **Audience:** Anyone implementing a conforming buyer agent, seller agent, firewall, or settlement service.
 **Editors' note:** ACNP is informed by Google's Agent Payments Protocol (AP2) — specifically its mandate chain (Intent Mandate → Cart Mandate → payment authorization) — and by the design goals of ACP (agent-to-agent commerce interoperability) and x402 (HTTP-native machine payments). ACNP is not wire-compatible with any of them; it borrows their trust architecture and adapts it to a two-party negotiation setting with an independent compliance layer. Divergences are noted in Appendix A.
 
@@ -50,7 +50,7 @@ Every ACNP message consists of an **envelope** and a type-specific **body**. Env
 | `protocol` | string | MUST | Literal `"ACNP"` |
 | `version` | string | MUST | `"0.1"`. Receiver rejects unknown major versions with `VERSION_UNSUPPORTED` |
 | `type` | string | MUST | One of the message types in §7 |
-| `message_id` | string (UUIDv4) | MUST | Globally unique per message |
+| `message_id` | string (UUIDv4) | MUST | Globally unique per message. Fields that *reference* a message id (`in_reply_to`, `accepted_message_id`, `rejected_message_id`, `offending_message_id`) are matched by exact string equality and are not re-validated as UUIDs |
 | `session_id` | string (UUIDv4) | MUST | Constant for the whole session; minted by the buyer in `session_init` |
 | `seq` | integer | MUST | Per (session, sender, receiver) stream — see §6; starts at 1, increments by exactly 1 per message sent on that stream |
 | `in_reply_to` | string | SHOULD | `message_id` of the message being answered; absent only on `mandate_register` and `session_init` |
@@ -78,7 +78,7 @@ Every ACNP message consists of an **envelope** and a type-specific **body**. Env
 
 ## 7. Message types
 
-Lifecycle order: `mandate_register → session_init → session_ack → catalog_request → catalog_offer → offer → counter_offer ×N → [bundle_proposal] → accept | reject | walk_away → cart_mandate → firewall_verdict → settlement_request → settlement_receipt`. `error` may occur at any point.
+Lifecycle order: `mandate_register → mandate_ack → session_init → session_ack → catalog_request → catalog_offer → offer → counter_offer ×N → [bundle_proposal] → accept | reject | walk_away → cart_mandate → firewall_verdict → settlement_request → settlement_receipt`. `error` may occur at any point.
 
 Who talks to whom (normative): buyer ↔ seller for everything from `session_init` through `accept`/`reject`/`walk_away`; buyer → firewall for `mandate_register` and `cart_mandate`; **firewall → settlement** for `settlement_request`. The buyer and seller agents have no endpoint on, and no route to, the settlement service. Settlement accepts `settlement_request` only from the firewall's configured key.
 
@@ -92,6 +92,12 @@ Sent once, before `session_init`, to deposit the principal-signed Intent Mandate
 
 Firewall rules: verify the principal signature against a configured principal key (`MANDATE_SIG_INVALID` otherwise); reject if `valid_until` has passed (`MANDATE_EXPIRED`); compute `intent_mandate_ref` = hash of the mandate (§3) and store the mandate by that ref. A second registration with the same ref is idempotent; a registration whose body differs but whose `session_id` is already bound is rejected (`MANDATE_CONFLICT`). The firewall replies with `mandate_ack` (body: `intent_mandate_ref`). **The stored copy is the only mandate the firewall will ever audit against** — nothing the buyer sends later can replace it.
 
+`mandate_ack` (firewall → buyer) body:
+
+| Field | Req | Rules |
+|---|---|---|
+| `intent_mandate_ref` | MUST | The hash the mandate was stored under; the buyer carries it in `session_init` and `cart_mandate` |
+
 ### 7.1 `session_init` (buyer → seller)
 Opens a session. Body:
 
@@ -102,10 +108,10 @@ Opens a session. Body:
 | `intent_mandate_ref` | MUST | Hash of the buyer's signed Intent Mandate (§8). The mandate itself is NEVER sent to the seller — only its hash, so the final cart can be bound to it without leaking budget ceilings or preferences to the counterparty |
 
 ### 7.2 `session_ack` (seller → buyer)
-Body: `seller_public_key`, `chosen_version`, `capabilities` — the manifest of what this merchant supports: `bundling` (bool), `quantity_discounts` (bool), `delivery_sla_negotiation` (bool), `max_rounds` (int, seller's cap), `currency`.
+Body: `seller_public_key`, `chosen_version`, `capabilities` — the manifest of what this merchant supports: `bundling` (bool), `quantity_discounts` (bool), `delivery_sla_negotiation` (bool), `max_rounds` (int, 1–50 in v0.1, seller's cap), `currency`.
 
 ### 7.3 `catalog_request` (buyer → seller)
-Body: optional `query` (free text, treated by the seller as untrusted input), optional `category`, `max_items`.
+Body: optional `query` (free text, treated by the seller as untrusted input), optional `category`, optional `max_items` (absent = the seller's own cap).
 
 ### 7.4 `catalog_offer` (seller → buyer)
 Body: `items[]`, each:
@@ -154,7 +160,7 @@ The bridge from negotiation to money. The firewall MUST reject a `cart_mandate` 
 Signed by the buyer agent. This is the artifact the firewall audits.
 
 ### 7.9 `firewall_verdict` (firewall → buyer, seller, ledger, dashboard; attached to `settlement_request`)
-Every verdict is delivered to both agents so each can advance its own state machine (§9); `allow` verdicts are additionally carried inside the `settlement_request` the firewall sends to settlement. Body: `cart_mandate_hash`, `verdict` ∈ `allow` | `block` | `escalate`, `layer` ∈ `policy` | `intent_verifier` | `human`, `reasons[]` (machine-readable codes — layer 1: `AMOUNT_CAP_EXCEEDED`, `QUANTITY_CAP_EXCEEDED`, `CATEGORY_BLOCKED`, `CATALOG_HASH_MISMATCH`, `MERCHANT_NOT_ALLOWLISTED`, `VELOCITY_LIMIT`, `MANDATE_EXPIRED`, `DEADLINE_PASSED`, `MANDATE_ALREADY_USED`, `MANDATE_IN_REVIEW`; layer 2: `INTENT_DRIFT_QUANTITY`, `INTENT_DRIFT_CATEGORY`, `INTENT_DRIFT_BUDGET`; human layer: `HUMAN_APPROVED`, `HUMAN_REJECTED`, `ESCALATION_TIMEOUT`), optional `verifier_summary` (LLM prose, informational, UNTRUSTED). Rules:
+Every verdict is delivered to both agents so each can advance its own state machine (§9); `allow` verdicts are additionally carried inside the `settlement_request` the firewall sends to settlement. Body: `cart_mandate_hash`, `verdict` ∈ `allow` | `block` | `escalate`, `layer` ∈ `policy` | `intent_verifier` | `human`, `reasons[]` (machine-readable codes — layer 1: `AMOUNT_CAP_EXCEEDED`, `QUANTITY_CAP_EXCEEDED`, `CATEGORY_BLOCKED`, `CATALOG_HASH_MISMATCH`, `MERCHANT_NOT_ALLOWLISTED`, `VELOCITY_LIMIT`, `MANDATE_EXPIRED`, `DEADLINE_PASSED`, `MANDATE_ALREADY_USED`, `MANDATE_IN_REVIEW`; layer 2: `INTENT_DRIFT_QUANTITY`, `INTENT_DRIFT_CATEGORY`, `INTENT_DRIFT_BUDGET`; human layer: `HUMAN_APPROVED`, `HUMAN_REJECTED`, `ESCALATION_TIMEOUT`), optional `verifier_summary` (LLM prose, informational, UNTRUSTED). Receivers validate `reasons[]` as upper-case codes (`^[A-Z_]+$`); the list above is what v0.1 emits, and an unlisted code is not a schema failure, so a MINOR version can add one. Rules:
 - Layer 1 (deterministic policy) runs first and can block alone.
 - **One mandate, one purchase.** An Intent Mandate is consumed by its first `allow` verdict; any later cart bound to the same `intent_mandate_ref` is blocked with `MANDATE_ALREADY_USED`. While a cart on that ref is held in `escalate`, a second cart on it is blocked with `MANDATE_IN_REVIEW` — a pending human decision counts as "in use", so no cart can race an escalation to an `allow`. A `block` does not consume the mandate; the buyer may negotiate a compliant cart. Velocity limits are keyed by `principal_id`, not by mandate, so issuing fresh mandates does not evade them.
 - **Layer 2 can only narrow, never widen.** The LLM intent-verifier runs only if layer 1 allows, and can only *recommend*; a deterministic component applies the final verdict. A recommendation of `allow` (with no reasons) yields `allow`; `block` with at least one `INTENT_DRIFT_*` reason yields `block`; `escalate` yields `escalate`; a recommendation that is absent (timeout, transport failure, unparseable, unknown reason code) or self-inconsistent (`allow` carrying reasons, `block` carrying none) yields `escalate` — never `allow`. There is no input to layer 2 that produces an `allow` layer 1 did not already grant.
@@ -180,8 +186,8 @@ Body: `code` (from §10), `detail` (string, no secrets), `offending_message_id` 
 | `goal` | Natural-language objective ("anniversary gift for spouse") |
 | `budget_ceiling` | Hard cap, minor units. Deterministically enforced by buyer strategy AND re-checked by the firewall |
 | `constraints` | Structured: `max_quantity`, `categories_allowed[]`, `deadline`, `delivery_max_days` |
-| `preferences` | Soft, for LLM reasoning only |
-| `max_rounds`, `valid_until` | Session limits |
+| `preferences` | Soft, for LLM reasoning only. MAY be absent (read as empty); the signature covers the mandate exactly as the principal serialized it |
+| `max_rounds`, `valid_until` | Session limits (`max_rounds` 1–50 in v0.1) |
 | `principal_id`, `principal_public_key`, `issued_at`, `signature` | Provenance. `signature` is Ed25519 by the principal key over the JCS form of the mandate with `signature` removed (same scheme as §5) |
 
 The firewall's layer 2 question is exactly: *does this cart mandate semantically satisfy this intent mandate?* Drift examples it must catch: quantity drift (intent implies 1, cart has 3), category drift (goal "gift", cart "server RAM"), budget drift (cart within cap but wildly inconsistent with goal).
@@ -210,6 +216,8 @@ States: `INIT → NEGOTIATING → AGREED → COMPLIANCE_REVIEW → SETTLING → 
 
 Terminal states: `SETTLED`, `WALKED_AWAY`, `BLOCKED`, `FAILED`, `EXPIRED`. Any message arriving in a state where it is not listed as a valid event is rejected with `STATE_INVALID`. Both agents, the firewall, and settlement each maintain the state machine independently; divergence is detectable from the ledger.
 
+Implementation notes (v0.1): `INIT` is the buyer's state from before `mandate_register` until `session_ack`; the seller has no pre-ack state and records the session as `NEGOTIATING` on `session_init`. `EXPIRED` is reserved — no party enters it in v0.1; `valid_until` is enforced by the firewall as `MANDATE_EXPIRED` at registration and again at verdict time. A party whose receipt-poll window closes stays in `SETTLING` (its run outcome is *pending*, never *failed*) because the receipt remains retrievable. A party MAY move any non-terminal state to `FAILED` on a local, non-protocol failure of its own run (for example the buyer cannot reach the firewall); such a transition is a ledger event on that party only. Known divergences of the reference implementation from this table are tracked in `docs/bugs/BUG-006-spec-code-drift.md`.
+
 ## 10. Error codes
 
 | Class | Codes |
@@ -220,15 +228,19 @@ Terminal states: `SETTLED`, `WALKED_AWAY`, `BLOCKED`, `FAILED`, `EXPIRED`. Any m
 
 `CAPABILITY_UNSUPPORTED` is returned when a message relies on a capability the `session_ack` manifest did not advertise (e.g. a `bundle_proposal` after `bundling: false`). `SESSION_UNKNOWN` is returned for any `session_id` the receiver has no state for (other than `session_init`). Every emitted error is a ledger entry.
 
+**Reserved in v0.1** — defined in the catalogue, never emitted by the reference implementation: `ROUNDS_EXCEEDED` (round exhaustion is signalled by `walk_away` with `reason_code: rounds_exhausted`); `RATE_LIMITED`; `CAPABILITY_UNSUPPORTED` (no v0.1 message relies on an unadvertised capability while `bundle_proposal` is unhandled); `VERDICT_MISSING` (a `settlement_request` without a verdict fails schema validation as `SCHEMA_INVALID` before the settlement checks run). They stay in the table so a MINOR version can start emitting them without a catalogue change.
+
 Ledger-only event types (not errors, never sent on the wire): `BOUNDS_CLAMPED` (seller policy engine altered an LLM proposal, §7.5), `SETTLEMENT_ATTEMPT` (each Razorpay call, §7.10), `VERIFIER_ABSENT` (layer 2 configured but no usable recommendation arrived, §7.9). `ESCALATION_TIMEOUT` is both a ledger event and the reason code carried by the resulting `block` verdict (§7.9), since that verdict is polled by the parties.
 
 ## 11. Ledger requirements
 
 Every protocol message, firewall verdict, settlement event, clamp event (§7.5), and error MUST be written to the append-only ledger as an entry containing: `entry_seq`, `timestamp`, `entry_type`, the full canonical message (or event payload), and `prev_entry_hash` — the hash of the previous entry — forming a verifiable chain. A `verify` routine MUST be able to walk the chain end-to-end and report the first inconsistency. There are no update or delete operations, in any environment, ever.
 
+Reference implementation (non-normative, D023): `entry_hash = sha256(prev_entry_hash ‖ JCS(entry))` from a fixed 64-zero genesis; every party keeps its own chain (there is no central ledger service). Entry types: `MESSAGE_IN`, `MESSAGE_OUT`, `BOUNDARY_REJECTED`, `HANDLER_REJECTED`, `LLM_MOVE`, `BOUNDS_CLAMPED`, `VERDICT`, `VERIFIER_ABSENT`, `ESCALATION_DECIDED`, `ESCALATION_TIMEOUT`, `SETTLEMENT_EVENT`, `SESSION_STATE`. `SETTLEMENT_ATTEMPT` (§10) is one of the settlement event types carried *inside* a `SETTLEMENT_EVENT` entry, not an entry type of its own.
+
 ## 12. Versioning
 
-`version` is MAJOR.MINOR. MINOR increments add optional fields/message types only (receivers ignore unknown optional fields). MAJOR increments may break anything and require re-negotiation in `session_init`. Every spec change lands as a DECISIONS.md entry citing the section changed, plus a version bump in this header. The implementation MUST reject, not "best-effort parse," messages from unknown MAJOR versions.
+`version` is MAJOR.MINOR. MINOR increments add optional fields/message types only (receivers ignore unknown optional *body* fields; the envelope is closed in v0.1 — an unknown envelope field is `SCHEMA_INVALID` — so adding an envelope field is itself a spec change). MAJOR increments may break anything and require re-negotiation in `session_init`. Every spec change lands as a DECISIONS.md entry citing the section changed, plus a version bump in this header. The implementation MUST reject, not "best-effort parse," messages from unknown MAJOR versions.
 
 ## 13. Conformance checklist (used by integration tests)
 

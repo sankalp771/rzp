@@ -16,6 +16,98 @@ Entry format:
 
 ---
 
+### D030 — 2026-09-04 — PROTOCOL.md is reconciled to the implementation editorially; behavioural drift is a bug list, not a spec edit — [human + Claude Fable 5.1]
+- **Decision:** The Day 12 field-by-field audit (BUG-006) split every
+  spec/code discrepancy in two. Where the spec merely under-described what
+  the code has always done — `mandate_ack` had no table, `max_items` and
+  `preferences` are optional, the envelope is closed while bodies are open,
+  `max_rounds` ≤ 50, `reasons[]` is validated by shape not enumeration,
+  four §10 codes are defined but never emitted, §11 named no entry types,
+  §9 lacked the merchant's missing `INIT`, the reserved `EXPIRED`, the
+  "pending stays `SETTLING`" rule and local-failure `FAILED` — the spec
+  text was changed, in one PROTOCOL.md-only commit, with no wire change
+  and the version left at 0.1. Where the code does not do what the spec
+  intends (the buyer fails on a seller `reject`/`bundle_proposal`, no
+  party enters `EXPIRED`, recoverable errors end the buyer's run,
+  `VERIFIER_ABSENT` missing from a constant), the spec stays as written
+  and BUG-006 lists the divergence as open.
+- **Because:** Gate 8 asks for a spec consistent with the code, and a
+  panel reading both will find the drift in minutes; under the freeze the
+  only honest moves are "describe what is built" and "list what is not".
+  §12 requires a DECISIONS entry for any spec change — this is it. None
+  of the edits changes a byte on the wire, a signature input, or a
+  verdict, so the version stays 0.1 (a MAJOR/MINOR bump would promise a
+  wire difference that does not exist).
+- **Instead of:** bending the spec to bless the behavioural gaps (B1–B5
+  would become "by design" without a reason); fixing the code under the
+  freeze (B4 is one line, but it is an export of the protocol package —
+  Gate 1 and a rebuild of every service two days before submission);
+  leaving the drift for a v0.2 nobody may write.
+- **Tradeoff accepted:** CONSTRAINTS #16 — PROTOCOL.md normative sections
+  were touched, so the edit shipped alone with its own review; the spec
+  now carries "Implementation notes" prose inside normative sections,
+  labelled as such.
+- **Revisit if:** B1–B5 are fixed — then the notes shrink; or a second
+  implementation appears — then "reference implementation" prose moves
+  to an appendix.
+
+### D029 — 2026-09-04 — The seller floor leak is documented with its number, not hardened before submission — [human + Claude Fable 5.1]
+- **Decision:** The Groq seller names the floor it cannot cross in 13.3%
+  (27/203) of its counter-offer rationales (FEATURE-011, `live-42-mistral`).
+  The fix — do not show the seller model its floor at all; the clamp never
+  needed it — is about ten lines in `services/merchant`. It is not made
+  in v0.1. The number stays in the README, THREAT_MODEL T3 and the report
+  as a measured, named weakness with the fix attached as the v0.2 item.
+- **Because:** A prompt change invalidates the cited 50-session live run
+  (the seller's behaviour is part of what it measured) and forces a fresh
+  live run on free-tier quota two days before the deadline; it is also a
+  `services/merchant` change under the feature freeze. A quantified,
+  documented weakness with a one-line fix attached is worth more to this
+  submission than a silent improvement nobody can check — and the number
+  is currently the strongest evidence that the evals measure honestly
+  (EVALS.md §1: report the failure numbers).
+- **Instead of:** hardening now and re-running (quota risk, freeze
+  violation, and the README table would change hours before the video);
+  filtering the rationale on the way out (hides the leak from the
+  transcript, not from the model; the metric would go to zero for the
+  wrong reason).
+- **Tradeoff accepted:** a panel member will ask why the seller leaks its
+  floor; the answer is the number, the mechanism (prose is not enforcement
+  — the price cannot leak, the words can) and the v0.2 line.
+- **Revisit if:** a spare quota day exists after everything in
+  FEATURE-012 is green — then the fix, a fresh live run, and both runs
+  cited side by side.
+
+### D028 — 2026-09-04 — Secret scanning is a standing CI gate (gitleaks over full history), with fake fixtures allow-listed by fingerprint — [human + Claude Fable 5.1]
+- **Decision:** `.github/workflows/ci.yml` gains a `secrets` job:
+  `actions/checkout` with `fetch-depth: 0` then `gitleaks/gitleaks-action@v2`
+  (free for personal repositories; a licence is only needed for
+  organisation accounts). The one finding over the 51-commit history — a
+  fake live key id (`rzp_live_ABC123`, secret `s`) in the settlement test
+  that asserts the boot rule *refuses* live keys — is allow-listed in
+  `.gitleaksignore` by its commit-scoped fingerprint with the reason on the
+  line above. The Day 12 scan itself (gitleaks 8.21.2 over `--all`
+  history, plus targeted greps for `rzp_live_`, `AIza`, `gsk_`, PEM
+  blocks and long tokens on `KEY|TOKEN|SECRET` lines, and the list of
+  every path ever committed matching `.env*`) is pasted in FEATURE-012.
+  The same commit documents the two env vars the code read that
+  `.env.example` did not list (`FIREWALL_LLM_CALL_TIMEOUT_MS`, `REVIEWER`).
+- **Because:** Gate 8 item 3 ("no secrets in history, scan tool run") is
+  a one-off unless CI repeats it; the repository is the résumé and three
+  provider keys have been pasted into chats and terminals during the
+  build (they are rotated before submission — DEMO.md checklist). A
+  fingerprint allow-list is the narrowest possible exception: one line,
+  one commit, one file, reason attached; a path- or rule-wide exception
+  would silence a real leak in the same file later.
+- **Instead of:** running gitleaks from a Docker image in CI (an extra
+  pull per run and no pinning benefit over the action); adding gitleaks
+  as a dev dependency (CONSTRAINTS #11 — a Go binary in `node_modules`
+  buys nothing); a custom grep job (misses entropy-based findings).
+- **Tradeoff accepted:** one more CI job (~20 s); the action needs
+  `GITHUB_TOKEN` to annotate PRs, which is the default token.
+- **Revisit if:** the repository moves under an organisation (then
+  `GITLEAKS_LICENSE` is required or the job switches to the binary).
+
 ### D027 — 2026-08-29 — `known-good-N` tags mean CI-green; `known-good-4` is moved onto the BUG-005 fix commit — [human + Claude Fable 5]
 - **Decision:** a `known-good-N` tag promises that the tagged sha passed
   CI on a clean clone (BUILD_PLAN's "Gate green. Tag `known-good`"). The

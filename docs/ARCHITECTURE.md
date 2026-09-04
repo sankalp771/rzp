@@ -15,6 +15,10 @@ Firewall** — settles the transaction through Razorpay (test mode). Every
 message and settlement event lands in a hash-chained, append-only audit log,
 making the whole negotiation cryptographically replayable.
 
+The one diagram of the system lives in the README ("Architecture") and
+is not duplicated here — one picture, kept true; this file is the prose
+map behind it.
+
 ## 2. Services (5)
 
 ### S1 — Merchant Commerce Server (seller side)
