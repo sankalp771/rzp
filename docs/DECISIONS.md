@@ -16,6 +16,41 @@ Entry format:
 
 ---
 
+### D030 — 2026-09-04 — PROTOCOL.md is reconciled to the implementation editorially; behavioural drift is a bug list, not a spec edit — [human + Claude Fable 5.1]
+- **Decision:** The Day 12 field-by-field audit (BUG-006) split every
+  spec/code discrepancy in two. Where the spec merely under-described what
+  the code has always done — `mandate_ack` had no table, `max_items` and
+  `preferences` are optional, the envelope is closed while bodies are open,
+  `max_rounds` ≤ 50, `reasons[]` is validated by shape not enumeration,
+  four §10 codes are defined but never emitted, §11 named no entry types,
+  §9 lacked the merchant's missing `INIT`, the reserved `EXPIRED`, the
+  "pending stays `SETTLING`" rule and local-failure `FAILED` — the spec
+  text was changed, in one PROTOCOL.md-only commit, with no wire change
+  and the version left at 0.1. Where the code does not do what the spec
+  intends (the buyer fails on a seller `reject`/`bundle_proposal`, no
+  party enters `EXPIRED`, recoverable errors end the buyer's run,
+  `VERIFIER_ABSENT` missing from a constant), the spec stays as written
+  and BUG-006 lists the divergence as open.
+- **Because:** Gate 8 asks for a spec consistent with the code, and a
+  panel reading both will find the drift in minutes; under the freeze the
+  only honest moves are "describe what is built" and "list what is not".
+  §12 requires a DECISIONS entry for any spec change — this is it. None
+  of the edits changes a byte on the wire, a signature input, or a
+  verdict, so the version stays 0.1 (a MAJOR/MINOR bump would promise a
+  wire difference that does not exist).
+- **Instead of:** bending the spec to bless the behavioural gaps (B1–B5
+  would become "by design" without a reason); fixing the code under the
+  freeze (B4 is one line, but it is an export of the protocol package —
+  Gate 1 and a rebuild of every service two days before submission);
+  leaving the drift for a v0.2 nobody may write.
+- **Tradeoff accepted:** CONSTRAINTS #16 — PROTOCOL.md normative sections
+  were touched, so the edit shipped alone with its own review; the spec
+  now carries "Implementation notes" prose inside normative sections,
+  labelled as such.
+- **Revisit if:** B1–B5 are fixed — then the notes shrink; or a second
+  implementation appears — then "reference implementation" prose moves
+  to an appendix.
+
 ### D028 — 2026-09-04 — Secret scanning is a standing CI gate (gitleaks over full history), with fake fixtures allow-listed by fingerprint — [human + Claude Fable 5.1]
 - **Decision:** `.github/workflows/ci.yml` gains a `secrets` job:
   `actions/checkout` with `fetch-depth: 0` then `gitleaks/gitleaks-action@v2`
