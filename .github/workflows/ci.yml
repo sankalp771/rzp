@@ -32,3 +32,16 @@ jobs:
       - run: docker compose ps
       - if: always()
         run: docker compose down
+
+  secrets:
+    # Gate 8: the whole history is scanned for leaked credentials on every
+    # push and PR (FEATURE-012, D028). Fixtures that are fake by design are
+    # listed by fingerprint in .gitleaksignore, one line each, with the reason.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # full history, not just the head commit
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

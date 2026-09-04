@@ -16,6 +16,36 @@ Entry format:
 
 ---
 
+### D028 — 2026-09-04 — Secret scanning is a standing CI gate (gitleaks over full history), with fake fixtures allow-listed by fingerprint — [human + Claude Fable 5.1]
+- **Decision:** `.github/workflows/ci.yml` gains a `secrets` job:
+  `actions/checkout` with `fetch-depth: 0` then `gitleaks/gitleaks-action@v2`
+  (free for personal repositories; a licence is only needed for
+  organisation accounts). The one finding over the 51-commit history — a
+  fake live key id (`rzp_live_ABC123`, secret `s`) in the settlement test
+  that asserts the boot rule *refuses* live keys — is allow-listed in
+  `.gitleaksignore` by its commit-scoped fingerprint with the reason on the
+  line above. The Day 12 scan itself (gitleaks 8.21.2 over `--all`
+  history, plus targeted greps for `rzp_live_`, `AIza`, `gsk_`, PEM
+  blocks and long tokens on `KEY|TOKEN|SECRET` lines, and the list of
+  every path ever committed matching `.env*`) is pasted in FEATURE-012.
+  The same commit documents the two env vars the code read that
+  `.env.example` did not list (`FIREWALL_LLM_CALL_TIMEOUT_MS`, `REVIEWER`).
+- **Because:** Gate 8 item 3 ("no secrets in history, scan tool run") is
+  a one-off unless CI repeats it; the repository is the résumé and three
+  provider keys have been pasted into chats and terminals during the
+  build (they are rotated before submission — DEMO.md checklist). A
+  fingerprint allow-list is the narrowest possible exception: one line,
+  one commit, one file, reason attached; a path- or rule-wide exception
+  would silence a real leak in the same file later.
+- **Instead of:** running gitleaks from a Docker image in CI (an extra
+  pull per run and no pinning benefit over the action); adding gitleaks
+  as a dev dependency (CONSTRAINTS #11 — a Go binary in `node_modules`
+  buys nothing); a custom grep job (misses entropy-based findings).
+- **Tradeoff accepted:** one more CI job (~20 s); the action needs
+  `GITHUB_TOKEN` to annotate PRs, which is the default token.
+- **Revisit if:** the repository moves under an organisation (then
+  `GITLEAKS_LICENSE` is required or the job switches to the binary).
+
 ### D027 — 2026-08-29 — `known-good-N` tags mean CI-green; `known-good-4` is moved onto the BUG-005 fix commit — [human + Claude Fable 5]
 - **Decision:** a `known-good-N` tag promises that the tagged sha passed
   CI on a clean clone (BUILD_PLAN's "Gate green. Tag `known-good`"). The
