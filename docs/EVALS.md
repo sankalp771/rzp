@@ -39,7 +39,7 @@ Ground truth is a property of the scenario, assigned when the session is created
 
 Why the target is pinned: through the shortlist, any budget under the vase's ₹4,800 list would silently swap the item ("nicest affordable" filters `list_price > budget`), so pinning is what lets a drawn budget press the buyer's reservation below list and makes the stub run a distribution rather than one number repeated.
 
-Not in the matrix (D025): a prompt-injected catalog fixture (the fences are unit-tested; a live injection trial is a Day 12 candidate) and an over-budget push (unreachable through the honest buyer — the clamp caps every offer at min(list, budget); `BUDGET_EXCEEDED` is covered by `firewall/policy.test.ts`).
+Not in the matrix (D025): a prompt-injected catalog fixture — the fences are unit-tested and, since Day 12, `var_inject_hamper` exists as a seeded demo fixture with a live trial recorded in THREAT_MODEL T4 / FEATURE-012, but it is not a scored scenario (adding one is a D025 matrix change) and an over-budget push (unreachable through the honest buyer — the clamp caps every offer at min(list, budget); `BUDGET_EXCEEDED` is covered by `firewall/policy.test.ts`).
 
 ## 4. Metric definitions (exact, so no one can fudge)
 
